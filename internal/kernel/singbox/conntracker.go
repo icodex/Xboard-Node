@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	singM "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -308,6 +309,17 @@ func (t *ConnTracker) RoutedPacketConnection(
 		limiter:    lim,
 		ctx:        ctx,
 	}
+}
+
+// RoutedFlow implements the adapter.ConnectionTracker hook for L3 flows
+// (added in sing-box 1.14.0). Per-user accounting happens at L4 in
+// RoutedConnection/RoutedPacketConnection, so flows are not tracked here.
+func (t *ConnTracker) RoutedFlow(
+	ctx context.Context,
+	metadata adapter.InboundContext,
+	_ adapter.Rule, _ adapter.Outbound,
+) tun.FlowTracker {
+	return nil
 }
 
 // checkDeviceGate rejects connections exceeding device limit.
