@@ -414,7 +414,7 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 			"email": userEmail(u.ID),
 		})
 	}
-	base["settings"] = M{"clients": clients}
+	base["settings"] = M{"version": nc.Version, "clients": clients}
 
 	ss := M{
 		"network": "hysteria",
