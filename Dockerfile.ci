@@ -5,7 +5,8 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata
 
-COPY xboard-node-linux /usr/local/bin/xboard-node
+# --chmod is required: upload/download-artifact does not preserve the exec bit
+COPY --chmod=0755 xboard-node-linux /usr/local/bin/xboard-node
 
 RUN mkdir -p /etc/xboard-node
 
