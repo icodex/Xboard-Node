@@ -8,6 +8,7 @@ import (
 
 	"github.com/cedar2025/xboard-node/internal/cert"
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/limiter"
 	"github.com/cedar2025/xboard-node/internal/model"
@@ -292,5 +293,59 @@ func TestValidateNodeRuntimeRejectsRealityWithoutServerNameOrDest(t *testing.T) 
 	}
 	if got := err.Error(); got != "reality tls requires tls_settings.server_name or tls_settings.dest" {
 		t.Fatalf("unexpected error: %v", got)
+	}
+}
+
+// A pinned singbox kernel must reject vmess+Reality instead of silently
+// running a plaintext inbound.
+func TestValidateNodeRuntimeRejectsVmessRealityOnSingbox(t *testing.T) {
+	cfg := &config.Config{Kernel: config.KernelConfig{Type: "singbox"}}
+	err := validateNodeRuntime(cfg, []string{"vmess"}, &model.NodeSpec{
+		Protocol: "vmess",
+		TLS:      2,
+		TLSSettings: map[string]any{
+			"private_key": "test-key",
+			"server_name": "example.com",
+		},
+	}, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	if err == nil {
+		t.Fatal("expected vmess+Reality on singbox to be rejected, got nil")
+	}
+	if !strings.Contains(err.Error(), "plaintext") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// A rejected config update must not swap (and thereby stop) the running
+// kernel in auto mode: validation runs before the swap, against the resolved
+// kernel's protocol list.
+func TestHandleWSEventRejectedConfigKeepsRunningKernel(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.cfg = &config.Config{Kernel: config.KernelConfig{Type: "auto"}}
+
+	// vless+Reality without tls_settings fails validation; auto would resolve
+	// this spec to singbox (not the fake), so the check uses the singbox list.
+	bad := &model.NodeSpec{Protocol: "vless", TLS: 2}
+	s.handleWSEvent(context.Background(), controlplane.Event{Type: controlplane.EventSyncConfig, Config: bad})
+
+	if s.kernel != k {
+		t.Fatalf("kernel was swapped on a rejected config: %T", s.kernel)
+	}
+	if !k.running {
+		t.Fatal("running kernel was stopped by a rejected config")
+	}
+
+	// A valid config for a different kernel type does swap.
+	good := &model.NodeSpec{
+		Protocol:   "tuic",
+		CertConfig: &config.CertConfig{CertMode: "self", Domain: "example.com"},
+	}
+	s.handleWSEvent(context.Background(), controlplane.Event{Type: controlplane.EventSyncConfig, Config: good})
+	if s.kernel == k {
+		t.Fatal("valid config for resolved singbox did not swap kernel")
+	}
+	if s.kernel.Name() != "sing-box" {
+		t.Fatalf("kernel after valid swap = %q, want sing-box", s.kernel.Name())
 	}
 }

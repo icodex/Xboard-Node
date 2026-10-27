@@ -311,6 +311,7 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 		MachineID:        o.cfg.Machine.MachineID,
 	}
 
+	o.mu.Lock()
 	o.ws = panel.NewWSClient(
 		hs.WebSocket.WSURL,
 		o.cfg.Machine.Token,
@@ -320,6 +321,7 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 		o.onWSStatus,
 		nil, // per-node status is sent via machineNodePush
 	)
+	o.mu.Unlock()
 
 	wsCtx, wsCancel := context.WithCancel(ctx)
 	o.wsCancel = wsCancel

@@ -184,10 +184,15 @@ func (s *Service) buildKernel(kernelType string) kernel.Kernel {
 // (or rebuilding, on hot config change) it when the resolved type differs.
 // Callers must hold no other service locks; kernel ops stay on the main loop.
 func (s *Service) ensureKernelFor(spec *model.NodeSpec) (kernel.Kernel, error) {
+	return s.ensureKernelResolved(spec, model.ResolveKernelForNode(spec, s.cfg.Kernel))
+}
+
+// ensureKernelResolved is ensureKernelFor with the resolution done by the
+// caller, so a config event resolves the kernel type exactly once.
+func (s *Service) ensureKernelResolved(spec *model.NodeSpec, resolved string) (kernel.Kernel, error) {
 	s.kernelMu.Lock()
 	defer s.kernelMu.Unlock()
 
-	resolved := model.ResolveKernelForNode(spec, s.cfg.Kernel)
 	current := s.kernel
 	if current != nil {
 		if name := strings.ToLower(strings.TrimSpace(s.cfg.Kernel.Type)); name != "auto" && name != "" {
@@ -198,7 +203,6 @@ func (s *Service) ensureKernelFor(spec *model.NodeSpec) (kernel.Kernel, error) {
 		if matchesResolvedKernel(current, resolved) {
 			return current, nil
 		}
-		current.Stop()
 		nlog.Core().Info("kernel auto-switch on config change",
 			"protocol", spec.Protocol, "network", spec.Network, "kernel", resolved)
 	}
@@ -210,6 +214,11 @@ func (s *Service) ensureKernelFor(spec *model.NodeSpec) (kernel.Kernel, error) {
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
 	s.kernel = k
+	// Stop the old kernel in the background: its drain (up to 5s) must not
+	// stall the service main loop. Instances share no state.
+	if current != nil {
+		go current.Stop()
+	}
 	return k, nil
 }
 
@@ -344,10 +353,10 @@ func (s *Service) initialSetup(ctx context.Context) error {
 		}
 		return fmt.Errorf("initial config is nil")
 	}
-	if err := s.resolveAutoKernel(bootstrap.Config); err != nil {
+	if err := validateNodeRuntime(s.cfg, s.kernelProtocolsFor(bootstrap.Config), bootstrap.Config, s.cert.TLSCert()); err != nil {
 		return err
 	}
-	if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), bootstrap.Config, s.cert.TLSCert()); err != nil {
+	if err := s.resolveAutoKernel(bootstrap.Config); err != nil {
 		return err
 	}
 
@@ -602,12 +611,13 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if newConfigHash == s.lastConfigHash {
 			return
 		}
-		if err := s.resolveAutoKernel(event.Config); err != nil {
-			nlog.Core().Warn("kernel auto-selection failed, ignoring update", "error", err)
+		if err := validateNodeRuntime(s.cfg, s.kernelProtocolsFor(event.Config), event.Config, s.cert.TLSCert()); err != nil {
+			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
 			return
 		}
-		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
-			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
+		// Validation passed — safe to swap the kernel for this spec now.
+		if err := s.resolveAutoKernel(event.Config); err != nil {
+			nlog.Core().Warn("kernel auto-selection failed, ignoring update", "error", err)
 			return
 		}
 		// Initialize nodeLog on first config
@@ -715,12 +725,11 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	}
 
 	if result.config != nil {
-		if err := s.resolveAutoKernel(result.config); err != nil {
-			nlog.Core().Warn("kernel auto-selection failed", "error", err)
-			result.config = nil
-		}
-		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
+		if err := validateNodeRuntime(s.cfg, s.kernelProtocolsFor(result.config), result.config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("runtime config validation failed", "error", err)
+			result.config = nil
+		} else if err := s.resolveAutoKernel(result.config); err != nil {
+			nlog.Core().Warn("kernel auto-selection failed", "error", err)
 			result.config = nil
 		} else {
 			configChanged = true
@@ -1210,24 +1219,39 @@ func (s *Service) reportDevices() {
 	s.sendDeviceBatch()
 }
 
+// kernelProtocolsFor returns the protocol list validation should check
+// against: the running kernel's, unless auto mode would switch kernels for
+// this spec — then the resolved type's list. Lets validation reject a config
+// before the kernel swap happens, so a rejected update leaves the old kernel
+// untouched and running.
+func (s *Service) kernelProtocolsFor(spec *model.NodeSpec) []string {
+	name := strings.ToLower(strings.TrimSpace(s.cfg.Kernel.Type))
+	if name == "auto" && spec != nil {
+		resolved := model.ResolveKernelForNode(spec, s.cfg.Kernel)
+		if !matchesResolvedKernel(s.kernel, resolved) {
+			if k := s.buildKernel(resolved); k != nil {
+				return k.Protocols()
+			}
+		}
+	}
+	return s.kernel.Protocols()
+}
+
 // ─── Runtime validation ─────────────────────────────────────────────────
 
 // resolveAutoKernel aligns s.kernel with the spec when kernel.type is auto.
-// It is a no-op for concrete kernel types. Call before validateNodeRuntime so
-// the protocol whitelist and transport checks run against the right kernel.
-// Runs on the main loop only (initialSetup / handleWSEvent / applyPullResult).
+// It is a no-op for concrete kernel types. Call only AFTER validateNodeRuntime
+// passed for this spec (via kernelProtocolsFor), so a rejected update never
+// stops the running kernel. Runs on the main loop only.
 func (s *Service) resolveAutoKernel(spec *model.NodeSpec) error {
 	name := strings.ToLower(strings.TrimSpace(s.cfg.Kernel.Type))
-	if name != "auto" {
+	if name != "auto" || spec == nil {
 		return nil
-	}
-	if spec == nil {
-		return nil
-	}
-	if _, err := s.ensureKernelFor(spec); err != nil {
-		return err
 	}
 	resolved := model.ResolveKernelForNode(spec, s.cfg.Kernel)
+	if _, err := s.ensureKernelResolved(spec, resolved); err != nil {
+		return err
+	}
 	nlog.Core().Info("kernel auto-selected",
 		"protocol", spec.Protocol, "network", spec.Network, "kernel", resolved)
 	return nil
@@ -1237,10 +1261,17 @@ func validateNodeRuntime(cfg *config.Config, kcfgSupported []string, spec *model
 	if spec == nil {
 		return fmt.Errorf("node spec is nil")
 	}
+	kernelType := cfgKernelType(cfg)
 	if !containsString(kcfgSupported, spec.Protocol) {
 		return fmt.Errorf("protocol %q is not supported by kernel %q", spec.Protocol, cfg.Kernel.Type)
 	}
-	if err := validateTLSRequirements(spec, tls, cfgKernelType(cfg)); err != nil {
+	// sing-box cannot do vmess+Reality; a pinned singbox kernel would start a
+	// plaintext inbound (Reality clients rejected, plaintext accepted). Auto
+	// mode resolves this to xray, so only explicit singbox lands here.
+	if kernelType == "singbox" && spec.Protocol == "vmess" && spec.TLS == 2 {
+		return fmt.Errorf("vmess with Reality would silently run plaintext on sing-box; use kernel xray or auto")
+	}
+	if err := validateTLSRequirements(spec, tls, kernelType); err != nil {
 		return err
 	}
 	if err := validateRuntimeCertConfig(spec); err != nil {
