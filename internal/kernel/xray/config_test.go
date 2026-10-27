@@ -4,7 +4,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/kernel"
@@ -52,6 +55,54 @@ func TestMarshalConfig_RejectsMissingInbound(t *testing.T) {
 	if _, err := marshalConfig(testKernelCfg, testNodeSpec(ok), testUsers, kernel.TLSCert{}); err != nil {
 		t.Errorf("expected vmess config to marshal, got %v", err)
 	}
+}
+
+// --- Restart on a running kernel must rebind the same port ---
+
+func TestStart_RestartWhileRunningRebindsPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	x := New(testKernelCfg)
+	nc := testNodeSpec(&panel.NodeConfig{Protocol: "vmess", ServerPort: port})
+	if err := x.Start(nc, testUsers, kernel.TLSCert{}); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	defer x.Stop()
+	if !assertPortAccepts(t, port) {
+		t.Fatal("port not accepting after first Start")
+	}
+
+	x.mu.Lock()
+	oldInst := x.instance
+	x.mu.Unlock()
+
+	// A restart on the running kernel must free the old listener first;
+	// otherwise the new instance cannot bind and the node wedges on old state.
+	if err := x.Start(nc, testUsers, kernel.TLSCert{}); err != nil {
+		t.Fatalf("second Start on running kernel: %v", err)
+	}
+
+	// If the old instance still owned the listener, closing it now kills the
+	// port and proves the new instance never bound it.
+	oldInst.Close()
+	if !assertPortAccepts(t, port) {
+		t.Fatal("port not accepting after restart: old instance still owned the listener")
+	}
+}
+
+func assertPortAccepts(t *testing.T, port int) bool {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func TestBuildConfig_OutboundPriority(t *testing.T) {

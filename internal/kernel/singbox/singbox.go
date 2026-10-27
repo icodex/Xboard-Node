@@ -93,6 +93,13 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Restart on a running kernel: stop the old instance first. Its live
+	// listeners make the new instance's bind fail (EADDRINUSE), wedging the
+	// node on the old state on every retry.
+	if s.box != nil {
+		s.stop()
+	}
+
 	cfgMap := buildConfig(s.cfg, nodeConfig, users, tls)
 	// A config without inbounds means the node protocol is unsupported by
 	// the kernel — refuse to start so the service layer never reports a
@@ -115,12 +122,6 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 		cancel()
 		return fmt.Errorf("parse sing-box options: %w", err)
 	}
-
-	// Save old state before creating the new instance.
-	oldBox := s.box
-	oldCancel := s.cancel
-	oldCtx := s.ctx
-	oldTracker := s.connTracker
 
 	instance, err := box.New(box.Options{
 		Context: ctx,
@@ -158,41 +159,8 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	s.trackerRegistered = false
 	s.registerTracker(ctx)
 
-	// Recycle old instance in background — drain then close.
-	if oldBox != nil {
-		go recycleOldBox(oldBox, oldCancel, oldCtx, oldTracker)
-	}
-
 	nlog.Core().Debug("sing-box started", "users", len(users))
 	return nil
-}
-
-// recycleOldBox gracefully shuts down a previous sing-box instance in the
-// background. It closes listen sockets first, waits for connections to drain,
-// then hard-closes. This avoids blocking the new instance's startup.
-func recycleOldBox(oldBox *box.Box, oldCancel context.CancelFunc, oldCtx context.Context, oldTracker *ConnTracker) {
-	// Step 1: close listen sockets so no new connections arrive on old ports.
-	if im := service.FromContext[adapter.InboundManager](oldCtx); im != nil {
-		_ = im.Close()
-	}
-
-	// Step 2: drain in-flight connections (best-effort).
-	if oldTracker != nil {
-		deadline := time.Now().Add(drainTimeout)
-		for time.Now().Before(deadline) {
-			if oldTracker.ActiveCount() == 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-
-	// Step 3: hard-close everything.
-	oldBox.Close()
-	if oldCancel != nil {
-		oldCancel()
-	}
-	nlog.Core().Debug("sing-box: old instance recycled")
 }
 
 // Reload hot-swaps the inbound users and routing rules without restarting the box.

@@ -115,6 +115,14 @@ func (x *Xray) Protocols() []string {
 //	Phase 4 – Swap:       store new, extract old     (brief kernel lock)
 //	Phase 5 – RecycleOld: close old in background    (non-blocking)
 func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
+	// ── Phase 0: Restart on a running kernel — free the ports first ──────
+	// The old instance's listeners keep the new one from binding; xray does
+	// not surface that error, so the node would silently keep serving the
+	// old config until the recycled instance closes. Close synchronously.
+	if x.running.Load() {
+		x.stopNow()
+	}
+
 	// ── Phase 1: Build config (no shared state) ─────────────────────────
 	x.ensureGeoData(nodeConfig)
 
@@ -211,6 +219,26 @@ func (x *Xray) Stop() {
 		drainConns(ld, drainTimeout)
 	}
 	closeOld(inst, ld)
+}
+
+// stopNow closes the running instance immediately, without draining: used when
+// restarting, where the ports must be free before the new instance binds.
+func (x *Xray) stopNow() {
+	x.running.Store(false)
+
+	x.mu.Lock()
+	inst := x.instance
+	ld := x.limitDispatcher
+	x.instance = nil
+	x.limitDispatcher = nil
+	x.mu.Unlock()
+
+	if inst != nil {
+		inst.Close()
+	}
+	if ld != nil {
+		ld.ResetConns()
+	}
 }
 
 func (x *Xray) IsRunning() bool { return x.running.Load() }
