@@ -4,7 +4,7 @@
 
 services:
   xboard-node:
-    image: ghcr.io/cedar2025/xboard-node:latest
+    image: ghcr.io/icodex/xboard-node:latest
     container_name: xboard-node
     network_mode: host
     restart: unless-stopped
