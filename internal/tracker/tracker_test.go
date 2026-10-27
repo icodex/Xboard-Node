@@ -230,3 +230,34 @@ func TestTrafficAccumulation(t *testing.T) {
 		t.Errorf("accumulated: got %v, want [350,600]", flushed[1])
 	}
 }
+
+// FlushAliveIPs must return an independent copy: a later Process must never
+// mutate data already handed to an in-flight push goroutine.
+func TestFlushAliveIPs_ReturnsIndependentSnapshot(t *testing.T) {
+	tr := New()
+	tr.Process(map[int][2]int64{1: {10, 20}}, map[int]map[string]bool{1: {"1.1.1.1": true}}, 1)
+	first := tr.FlushAliveIPs()
+
+	tr.Process(map[int][2]int64{1: {10, 20}}, map[int]map[string]bool{1: {"9.9.9.9": true}}, 1)
+
+	if len(first[1]) != 1 || first[1][0] != "1.1.1.1" {
+		t.Fatalf("first flush snapshot mutated by later Process: %v", first[1])
+	}
+}
+
+func TestMarkAliveIPsStale(t *testing.T) {
+	tr := New()
+	tr.Process(map[int][2]int64{1: {1, 1}}, map[int]map[string]bool{1: {"1.1.1.1": true}}, 1)
+
+	if tr.FlushAliveIPs() == nil {
+		t.Fatal("first flush should return data")
+	}
+	if tr.FlushAliveIPs() != nil {
+		t.Fatal("unchanged snapshot should be skipped")
+	}
+
+	tr.MarkAliveIPsStale()
+	if again := tr.FlushAliveIPs(); again == nil || len(again[1]) != 1 {
+		t.Fatalf("after MarkAliveIPsStale flush should resend, got %v", again)
+	}
+}

@@ -990,7 +990,9 @@ func (s *Service) pushReportAsync() {
 				s.tracker.RestoreTraffic(traffic)
 			}
 			if len(aliveIPs) > 0 {
-				s.tracker.RestoreAliveIPs(aliveIPs)
+				// Alive IPs are a full snapshot, not a delta: drop the change
+				// cache so the next flush resends everything.
+				s.tracker.MarkAliveIPsStale()
 			}
 			s.pushBackoff.onFailure()
 			return

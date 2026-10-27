@@ -217,15 +217,14 @@ func (d *LimitDispatcher) ResetConns() {
 // GetConnectionState returns dispatcher-tracked alive IPs and connection count.
 // Traffic bytes are intentionally left to xray's built-in stats pipeline.
 func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool, connCount int) {
+	// Copy the limited-IP nested maps while still holding RLock: delConn
+	// mutates those entries under the write lock, and iterating them after
+	// releasing RLock is a fatal concurrent map iteration and map write.
 	d.mu.RLock()
 	emailToUID := d.emailToUID
-	limitedIPs := d.limitedIPs
-	d.mu.RUnlock()
+	aliveIPs = make(map[int]map[string]bool, len(d.limitedIPs))
 
-	aliveIPs = make(map[int]map[string]bool)
-
-	// Collect IPs from limited users (under RLock snapshot).
-	for email, ipsMap := range limitedIPs {
+	for email, ipsMap := range d.limitedIPs {
 		uid := emailToUID[email]
 		if uid == 0 {
 			continue
@@ -238,6 +237,7 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
 			aliveIPs[uid] = ipSet
 		}
 	}
+	d.mu.RUnlock()
 
 	// Collect IPs from unlimited users (lock-free).
 	d.unlimitedIPs.Range(func(key, value interface{}) bool {

@@ -1,8 +1,11 @@
 package xray
 
 import (
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/xtls/xray-core/common/buf"
@@ -232,4 +235,45 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	if ld.checkDeviceLimit(email, "2.2.2.2", true) {
 		t.Fatal("device slot should be released after writer close")
 	}
+}
+
+// GetConnectionState copies limited-IP maps while holding RLock; concurrent
+// delConn must not race (fatal under -race without the copy).
+func TestLimitDispatcher_GetConnectionState_ConcurrentWithClose(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1000}, nil)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ip := fmt.Sprintf("10.0.%d.%d", (i>>8)&0xff, i&0xff)
+			if !ld.checkDeviceLimit(email, ip, true) {
+				ld.delConn(email, ip)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ld.GetConnectionState()
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

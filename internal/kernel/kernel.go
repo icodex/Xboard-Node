@@ -133,8 +133,16 @@ func UserDiff(oldUsers, newUsers []model.UserSpec) (toAdd, toRemove []model.User
 
 	for _, u := range newUsers {
 		old, exists := oldMap[u.ID]
-		if !exists || old.UUID != u.UUID {
+		if !exists {
 			toAdd = append(toAdd, u)
+			continue
+		}
+		if old.UUID != u.UUID {
+			// Same ID with a rotated UUID: remove the old credential too, or
+			// UserManager backends reject the add (email already exists) and
+			// the user keeps the stale credential.
+			toAdd = append(toAdd, u)
+			toRemove = append(toRemove, old)
 		}
 	}
 	for _, u := range oldUsers {

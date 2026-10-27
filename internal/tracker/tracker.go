@@ -49,10 +49,6 @@ type Tracker struct {
 	// Readers load this pointer without any lock.
 	live atomic.Pointer[snapshot]
 
-	// aliveIPsBuf is a reusable buffer for FlushAliveIPs output.
-	// Avoids allocating a new map+slice every 60s.
-	aliveIPsBuf map[int][]string
-
 	// lastAliveIPsHash detects changes to avoid duplicate reports.
 	lastAliveIPsHash string
 }
@@ -61,7 +57,6 @@ func New() *Tracker {
 	t := &Tracker{
 		lastSeen:       make(map[int][2]int64),
 		pendingTraffic: make(map[int][2]int64),
-		aliveIPsBuf:    make(map[int][]string),
 	}
 	// Publish initial empty snapshot.
 	t.live.Store(&snapshot{
@@ -159,8 +154,8 @@ func (t *Tracker) HasTraffic() bool {
 	return len(t.pendingTraffic) > 0
 }
 
-// FlushAliveIPs returns per-user alive IPs.
-// Reuses internal buffer. Returns nil if unchanged.
+// FlushAliveIPs returns per-user alive IPs as a fresh copy safe for
+// asynchronous marshalling. Returns nil if unchanged since the last flush.
 func (t *Tracker) FlushAliveIPs() map[int][]string {
 	s := t.live.Load()
 
@@ -177,25 +172,23 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 
 	t.lastAliveIPsHash = currentHash
 
-	// Clear old buffer entries.
-	for k := range t.aliveIPsBuf {
-		delete(t.aliveIPsBuf, k)
-	}
-
-	// Fill buffer from snapshot.
+	out := make(map[int][]string, len(s.aliveIPs))
 	for uid, ips := range s.aliveIPs {
-		buf := t.aliveIPsBuf[uid]
-		if buf == nil {
-			buf = make([]string, 0, len(ips))
-		}
-		buf = buf[:0]
+		list := make([]string, 0, len(ips))
 		for ip := range ips {
-			buf = append(buf, ip)
+			list = append(list, ip)
 		}
-		t.aliveIPsBuf[uid] = buf
+		out[uid] = list
 	}
+	return out
+}
 
-	return t.aliveIPsBuf
+// MarkAliveIPsStale forces the next FlushAliveIPs to resend the snapshot even
+// if unchanged. Used when a push to the panel failed and the data was lost.
+func (t *Tracker) MarkAliveIPsStale() {
+	t.mu.Lock()
+	t.lastAliveIPsHash = ""
+	t.mu.Unlock()
 }
 
 // calcAliveIPsHash computes a deterministic hash for change detection.
@@ -241,31 +234,6 @@ func (t *Tracker) CurrentOnline() map[int]int {
 		cp[k] = v
 	}
 	return cp
-}
-
-// RestoreAliveIPs merges alive IPs back in (used when push to panel fails).
-// Note: this operates on the buffer, which will be overwritten next Process().
-func (t *Tracker) RestoreAliveIPs(data map[int][]string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for uid, ipList := range data {
-		ips := t.aliveIPsBuf[uid]
-		if ips == nil {
-			ips = make([]string, 0, len(ipList))
-		}
-		// Use map for O(n) dedup instead of O(n²) linear search
-		existMap := make(map[string]struct{}, len(ips)+len(ipList))
-		for _, existing := range ips {
-			existMap[existing] = struct{}{}
-		}
-		for _, ip := range ipList {
-			if _, exists := existMap[ip]; !exists {
-				ips = append(ips, ip)
-				existMap[ip] = struct{}{}
-			}
-		}
-		t.aliveIPsBuf[uid] = ips
-	}
 }
 
 // LogStats logs current tracking statistics.
