@@ -164,7 +164,7 @@ type CertConfig struct {
 	CertMode string `yaml:"cert_mode"`
 
 	// DNSProvider specifies the DNS provider for DNS-01 challenge.
-	// Supported: "cloudflare", "alidns"
+	// 21 providers supported (aliases included); see docs-dns-providers.md.
 	DNSProvider string `yaml:"dns_provider"`
 
 	// DNSEnv passes credentials to the DNS provider as key=value pairs.

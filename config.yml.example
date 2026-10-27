@@ -1,17 +1,141 @@
 # Xboard Node Configuration
+# Copy this file to config.yml and modify as needed.
 # Top-level settings are inherited by all instances. Instance overrides take precedence.
+# Unlisted fields are optional; defaults are shown in comments.
 
-# ── Single node (simplest) ──
-# panel:
-#   url: "https://panel.example.com"
-#   token: "your-api-key"
-#   node_id: 1
+# ══════════════════════════════════════════════════════════════════════════════
+# PANEL BINDING (single node mode — simplest setup)
+# Most node settings (protocol, port, TLS, rules) are managed from the panel.
+# ══════════════════════════════════════════════════════════════════════════════
+panel:
+  url: "https://panel.example.com"   # Xboard panel URL (required)
+  token: "your-server-token"         # server communication token (required)
+  # token_env: "PANEL_TOKEN"         # alternative: read token from this env var
+  node_id: 1                         # node ID as configured in the panel
+  # node_type: ""                    # optional node type hint
 
-# ── Multiple instances ──
-# kernel:
-#   type: "singbox"
-# log:
-#   level: "info"
+# ══════════════════════════════════════════════════════════════════════════════
+# KERNEL
+# ══════════════════════════════════════════════════════════════════════════════
+kernel:
+  # "singbox" (default), "xray", or "auto" (pick kernel per node transport)
+  type: "singbox"
+  # Working directory for generated configs and state.
+  # Default: directory containing this config file.
+  # config_dir: "/etc/xboard-node"
+  # Directory holding GeoIP/GeoSite databases. Default: same as config_dir.
+  # For sing-box: geoip.db / geosite.db; for xray: geoip.dat / geosite.dat.
+  # geo_data_dir: "/etc/xboard-node"
+  # Kernel log level: debug/info/warn/error (default: warn; panel can override)
+  log_level: "warn"
+  # Kernel-native extensions, all optional. See docs-custom-*.md files.
+  # custom_outbound: []        # raw kernel-native outbound objects
+  # custom_route: []           # raw kernel-native route rule objects
+  # custom_config: ""          # path to kernel-native JSON/YAML file, deep-merged last
+                               # (V2bX OriginalPath format compatible)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TLS CERTIFICATE
+# cert_mode: "http" | "dns" | "self" | "file" | "content" | "none"
+#   http    - ACME HTTP-01 challenge (requires port 80 open to internet)
+#   dns     - ACME DNS-01 challenge (supports wildcard, requires dns_provider)
+#   self    - self-signed certificate (valid 10 years, no external dependency)
+#   file    - use cert_file / key_file
+#   content - cert/key PEM given directly as cert_content / key_content
+#   none    - no TLS
+# Empty cert_mode auto-detects: cert_file set -> file; auto_tls -> http; else none.
+# Issued certs are persisted under cert_dir (default: {config_dir}/certs).
+# ══════════════════════════════════════════════════════════════════════════════
+cert:
+  cert_mode: "none"
+  # auto_tls: true               # legacy flag: equivalent to cert_mode "http"
+  # Domain for ACME or self-signed cert
+  # domain: "node.example.com"
+  # email: "admin@example.com"  # ACME registration
+  # http_port: 80               # local port for HTTP-01 challenge (default: 80)
+  # dns_provider: "cloudflare"  # 21 providers supported; see docs-dns-providers.md
+  # dns_env:                    # provider credentials
+  #   CF_API_TOKEN: "your-cloudflare-api-token"
+  # File mode:
+  # cert_file: "/etc/xboard-node/certs/fullchain.pem"
+  # key_file: "/etc/xboard-node/certs/privkey.pem"
+  # Content mode (PEM pushed inline or from panel):
+  # cert_content: ""
+  # key_content: ""
+  # cert_dir: "/etc/xboard-node/certs"   # storage for issued certs
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ══════════════════════════════════════════════════════════════════════════════
+log:
+  level: "info"     # debug/info/warn/error (default: info)
+  output: "stdout"  # stdout/stderr or a file path
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SYNC INTERVALS (seconds; defaults shown)
+# push_interval / pull_interval default to the panel handshake values;
+# explicit config values take precedence.
+# ══════════════════════════════════════════════════════════════════════════════
+# node:
+#   track_interval: 10          # kernel traffic-track tick
+#   device_report_interval: 30  # alive-IP / online-device report
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET TUNING (seconds; defaults shown)
+# ══════════════════════════════════════════════════════════════════════════════
+# ws:
+#   status_interval: 10      # node.status report interval
+#   handshake_timeout: 15    # WS handshake timeout
+#   backoff_initial: 1       # initial reconnect delay
+#   backoff_max: 60          # max reconnect delay
+#   discovery_interval: 300  # periodic re-handshake / discovery
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GO RUNTIME TUNING
+# ══════════════════════════════════════════════════════════════════════════════
+# runtime:
+#   gomemlimit: "30MiB"  # soft memory cap (B/KiB/MiB/GiB/TiB); ~80% of RAM recommended
+#   gogc: 50             # lower GC target: less memory, slightly more CPU
+
+# Health-check endpoint on this port (0 = disabled, default).
+# health_port: 65530
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MULTI-NODE MODE
+# One panel binding, several node IDs in one process. When `nodes:` is present,
+# panel.node_id is ignored. All entries share panel URL/token and kernel type;
+# per-entry overrides below. Each node gets its own config_dir/node-<id> state.
+# ══════════════════════════════════════════════════════════════════════════════
+# nodes:
+#   - node_id: 1
+#
+#   - node_id: 2
+#     node_type: ""                # optional
+#     kernel:                      # optional per-node subset override
+#       config_dir: "/etc/xboard-node/node-2"
+#       geo_data_dir: ""
+#       log_level: "warn"
+#       custom_config: ""
+#     cert:                        # optional full cert override (same fields as above)
+#       cert_mode: "http"
+#       domain: "node2.example.com"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MACHINE MODE
+# One process manages ALL nodes bound to this machine on the panel. Nodes are
+# discovered dynamically. When `machine:` is set, panel.node_id, panel.token
+# and nodes: are ignored.
+# ══════════════════════════════════════════════════════════════════════════════
+# machine:
+#   machine_id: 1
+#   token: "your-machine-token"
+#   # token_env: "MACHINE_TOKEN"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MULTIPLE INSTANCES
+# Independent panel/machine bindings in one process; each inherits top-level
+# settings and may override kernel/log/cert per instance.
+# ══════════════════════════════════════════════════════════════════════════════
 # instances:
 #   - panel:
 #       url: "https://panel.example.com"
@@ -24,3 +148,20 @@
 #       token: "machine-token-2"
 #     log:
 #       level: "debug"   # override for this instance only
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STANDALONE MODE
+# Run without a panel; node spec and users come from this file.
+# See internal/config/standalone.go for the full node/user field set.
+# ══════════════════════════════════════════════════════════════════════════════
+# standalone:
+#   enabled: true
+#   node:
+#     protocol: "vless"        # vless/vmess/trojan/shadowsocks/hysteria2/...
+#     server_port: 443
+#     # ... protocol-specific fields
+#   users:
+#     - id: 1
+#       uuid: "your-uuid"
+#       # speed_limit: 100    # Mbps, optional
+#       # device_limit: 3     # optional
