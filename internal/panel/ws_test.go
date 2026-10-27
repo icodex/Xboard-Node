@@ -289,3 +289,36 @@ func TestWSClient_UserDeltaEvent(t *testing.T) {
 		t.Errorf("unexpected DeltaUsers: %+v", received[0].DeltaUsers)
 	}
 }
+
+// Send* must be race-free against connect() swapping the write channel.
+func TestWSClient_ConcurrentSendDuringReconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	// Server closes every connection right after auth: constant reconnect
+	// churn with a tiny backoff maximises the swap/send overlap window.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		if err := conn.WriteJSON(wsMessage{Event: "auth.success"}); err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	ws := NewWSClient("ws://"+host, "race-token", 1,
+		WSClientConfig{BackoffInitial: 10 * time.Millisecond, BackoffMax: 50 * time.Millisecond},
+		func(WSEvent) {}, nil, func() map[string]interface{} { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go ws.Run(ctx)
+
+	for ctx.Err() == nil {
+		ws.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}})
+	}
+}

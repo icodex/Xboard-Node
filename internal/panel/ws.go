@@ -109,8 +109,9 @@ type WSClient struct {
 	connected atomic.Bool
 
 	// writeCh allows sending messages from outside the connect loop.
-	// It is set in connect() and cleared on disconnect.
-	writeCh chan wsMessage
+	// Atomic pointer: connect() (its own goroutine) swaps it on every
+	// connection while the Send* methods run on other goroutines.
+	writeCh atomic.Pointer[chan wsMessage]
 }
 
 // NewWSClient creates a new WebSocket client.
@@ -258,8 +259,8 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	// writeCh decouples data collection from network I/O.
 	writeCh := make(chan wsMessage, 16)
-	w.writeCh = writeCh
-	defer func() { w.writeCh = nil }()
+	w.writeCh.Store(&writeCh)
+	defer func() { w.writeCh.Store(nil) }()
 
 	errCh := make(chan error, 1)
 	done := make(chan struct{})
@@ -471,11 +472,7 @@ func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string)
 		Timestamp: time.Now().Unix(),
 	}
 
-	select {
-	case w.writeCh <- msg:
-	default:
-		nlog.Core().Warn("ws write channel full, skipping device report")
-	}
+	w.trySend(msg, "device report")
 }
 
 // SendNodeStatus sends a node.status event with the given node_id (machine mode).
@@ -492,11 +489,7 @@ func (w *WSClient) SendNodeStatus(nodeID int, stats map[string]interface{}) {
 		Data:      data,
 		Timestamp: time.Now().Unix(),
 	}
-	select {
-	case w.writeCh <- msg:
-	default:
-		nlog.Core().Warn("ws write channel full, skipping node status")
-	}
+	w.trySend(msg, "node status")
 }
 
 // SendRaw sends a raw message to the panel via WebSocket.
@@ -511,9 +504,19 @@ func (w *WSClient) SendRaw(event string, data json.RawMessage) {
 		Timestamp: time.Now().Unix(),
 	}
 
+	w.trySend(msg, "raw message")
+}
+
+// trySend enqueues msg on the current connection's write channel. Safe to call
+// from any goroutine, including while connect() is swapping the channel.
+func (w *WSClient) trySend(msg wsMessage, what string) {
+	ch := w.writeCh.Load()
+	if ch == nil {
+		return
+	}
 	select {
-	case w.writeCh <- msg:
+	case *ch <- msg:
 	default:
-		nlog.Core().Warn("ws write channel full, skipping raw message", "event", event)
+		nlog.Core().Warn("ws write channel full, skipping "+what, "event", msg.Event)
 	}
 }
