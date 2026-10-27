@@ -26,7 +26,10 @@ kernel:
   # Directory holding GeoIP/GeoSite databases. Default: same as config_dir.
   # For sing-box: geoip.db / geosite.db; for xray: geoip.dat / geosite.dat.
   # geo_data_dir: "/etc/xboard-node"
-  # Kernel log level: debug/info/warn/error (default: warn; panel can override)
+  # Kernel log level: debug/info/warn/error/fatal (default: warn; panel kernel_log_level can override)
+  # fatal silences sing-box per-connection errors (REALITY probe noise "processed
+  # invalid connection", client EOF/mux disconnects) but also hides real kernel
+  # errors (e.g. outbound DNS lookup failures). Keep warn unless log flood is a problem.
   log_level: "warn"
   # Kernel-native extensions, all optional. See docs-custom-*.md files.
   # custom_outbound: []        # raw kernel-native outbound objects
@@ -68,6 +71,8 @@ cert:
 # LOGGING
 # ══════════════════════════════════════════════════════════════════════════════
 log:
+  # xboard-node's own logs only ([core] / node-prefixed lines).
+  # Kernel (sing-box/xray) logs are controlled separately by kernel.log_level.
   level: "info"     # debug/info/warn/error (default: info)
   output: "stdout"  # stdout/stderr or a file path
 
