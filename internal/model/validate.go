@@ -48,10 +48,22 @@ var singboxUnsupportedTransports = map[string]bool{
 	"splithttp": true,
 }
 
+// xrayUnsupportedTransports lists transport types the pinned xray-core fork
+// removed (infra/conf/transport_internet.go: h2/http and quic return
+// PrintRemovedFeatureError and fail config parsing).
+var xrayUnsupportedTransports = map[string]bool{
+	"h2":   true,
+	"http": true,
+	"quic": true,
+}
+
 func validateTransportKernel(network, kernelType string) error {
 	net := strings.ToLower(strings.TrimSpace(network))
 	if kernelType == "singbox" && singboxUnsupportedTransports[net] {
 		return fmt.Errorf("transport %q is not supported by sing-box kernel; use xray kernel instead", net)
+	}
+	if kernelType == "xray" && xrayUnsupportedTransports[net] {
+		return fmt.Errorf("transport %q is not supported by xray kernel (removed upstream); use sing-box kernel instead", net)
 	}
 	return nil
 }
@@ -64,6 +76,9 @@ func ResolveKernelForTransport(network, configuredKernel string) string {
 	net := strings.ToLower(strings.TrimSpace(network))
 	if configuredKernel == "singbox" && singboxUnsupportedTransports[net] {
 		return "xray"
+	}
+	if configuredKernel == "xray" && xrayUnsupportedTransports[net] {
+		return "singbox"
 	}
 	return configuredKernel
 }

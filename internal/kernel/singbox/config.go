@@ -553,7 +553,11 @@ func buildVMess(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
 	applyProxyProtocol(base, nc)
 	applyMultiplex(base, nc)
 
-	if nc.TLS == 1 {
+	if nc.TLS == 2 {
+		// sing-box vmess inbound has no REALITY support; silently dropping it
+		// produces a plaintext inbound on a node the panel thinks is secured
+		nlog.Core().Warn("sing-box vmess does not support Reality (tls=2), inbound will run without TLS; use xray kernel for vmess+Reality")
+	} else if nc.TLS == 1 {
 		if tls := buildTLSConfig(nc, tc); tls != nil {
 			base["tls"] = tls
 		}
@@ -668,6 +672,10 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 		base["users"] = userList
 		base["up_mbps"] = nc.UpMbps
 		base["down_mbps"] = nc.DownMbps
+
+		if nc.UpMbps <= 0 || nc.DownMbps <= 0 {
+			nlog.Core().Warn("sing-box hysteria v1 requires positive up_mbps/down_mbps from the panel; inbound may fail to start")
+		}
 
 		if nc.Obfs != "" {
 			base["obfs"] = nc.Obfs
@@ -810,10 +818,21 @@ func applyTransport(base M, nc *model.NodeSpec) {
 				transport["path"] = v
 			}
 			if v, ok := nc.NetworkSettings["headers"]; ok {
-				transport["headers"] = v
+				if hm, ok := v.(map[string]any); ok {
+					headers := make(M, len(hm)+1)
+					for hk, hv := range hm {
+						headers[hk] = hv
+					}
+					transport["headers"] = headers
+				} else {
+					transport["headers"] = v
+				}
 			}
 			if v, ok := nc.NetworkSettings["host"]; ok {
-				if transport["headers"] == nil {
+				// Host header wins over a same-named panel header, matching the xray builder
+				if headers, ok := transport["headers"].(map[string]any); ok {
+					headers["Host"] = v
+				} else {
 					transport["headers"] = M{"Host": v}
 				}
 			}
@@ -942,10 +961,20 @@ func buildRealityConfig(nc *model.NodeSpec) M {
 			handshake["server_port"] = settings.ServerPort
 		}
 		reality["handshake"] = handshake
+		// The handshake target doubles as the REALITY fallback server: every
+		// rejected handshake dials it, so log it — an unreachable target shows
+		// up client-side as "REALITY: processed invalid connection".
+		nlog.Core().Info("reality handshake target",
+			"server", handshake["server"], "server_port", handshake["server_port"])
 	}
 
 	if settings.ServerName != "" {
 		tls["server_name"] = settings.ServerName
+	} else if handshake, ok := reality["handshake"].(M); ok {
+		// sing-box forks build the SNI whitelist from tls.server_name alone;
+		// leaving it empty makes every client SNI mismatch. Fall back to the
+		// handshake host (the SNI clients send matches it by construction).
+		tls["server_name"] = handshake["server"]
 	}
 
 	tls["reality"] = reality

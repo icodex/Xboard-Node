@@ -887,3 +887,50 @@ func TestExtractECHInbound(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRealityConfig_ServerNameFallback(t *testing.T) {
+	// Panel sends reality_settings with dest only (server_name null):
+	// the SNI whitelist must not be left empty or every client is rejected
+	spec := &model.NodeSpec{TLS: 2, TLSSettings: map[string]interface{}{
+		"private_key": "test-private-key-value",
+		"dest":        "fallback.example.com:8443",
+		"server_name": nil,
+	}}
+
+	tls := buildRealityConfig(spec)
+	if sn := tls["server_name"]; sn != "fallback.example.com" {
+		t.Errorf("server_name fallback: got %v, want fallback.example.com", sn)
+	}
+
+	handshake, ok := tls["reality"].(M)["handshake"].(M)
+	if !ok {
+		t.Fatal("handshake missing")
+	}
+	if handshake["server"] != "fallback.example.com" || handshake["server_port"] != 8443 {
+		t.Errorf("handshake: got %v:%v, want fallback.example.com:8443", handshake["server"], handshake["server_port"])
+	}
+}
+
+func TestApplyTransport_WS_HostOverridesHeader(t *testing.T) {
+	nc := &model.NodeSpec{
+		Network: "ws",
+		NetworkSettings: map[string]interface{}{
+			"path":    "/ws",
+			"host":    "cdn.example.com",
+			"headers": map[string]interface{}{"User-Agent": "test", "Host": "stale.example.com"},
+		},
+	}
+	base := M{}
+	applyTransport(base, nc)
+
+	headers, ok := base["transport"].(M)["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("headers missing: %v", base["transport"])
+	}
+	if headers["Host"] != "cdn.example.com" {
+		t.Errorf("Host: got %v, want cdn.example.com", headers["Host"])
+	}
+	if headers["User-Agent"] != "test" {
+		t.Errorf("panel header lost: %v", headers)
+	}
+}

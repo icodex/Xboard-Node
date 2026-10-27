@@ -572,3 +572,135 @@ func TestExtractECHServerKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRealitySettings(t *testing.T) {
+	base := map[string]interface{}{
+		"private_key": "test-private-key-value",
+	}
+
+	tests := []struct {
+		name        string
+		tlsSettings map[string]interface{}
+		wantTarget  string
+		wantNames   []string
+		wantShortID []string
+	}{
+		{
+			name:        "dest null falls back to server_name (real panel payload)",
+			tlsSettings: mergeTLS(base, map[string]interface{}{"dest": nil, "server_name": "www.example.com", "short_id": "0123abcd"}),
+			wantTarget:  "www.example.com:443",
+			wantNames:   []string{"www.example.com"},
+			wantShortID: []string{"0123abcd"},
+		},
+		{
+			name:        "dest without port uses server_port",
+			tlsSettings: mergeTLS(base, map[string]interface{}{"dest": "fallback.example.com", "server_name": "www.example.com", "server_port": 8443}),
+			wantTarget:  "fallback.example.com:8443",
+			wantNames:   []string{"www.example.com"},
+			wantShortID: []string{""},
+		},
+		{
+			name:        "dest with port kept as-is",
+			tlsSettings: mergeTLS(base, map[string]interface{}{"dest": "fallback.example.com:8443", "server_name": "www.example.com"}),
+			wantTarget:  "fallback.example.com:8443",
+			wantNames:   []string{"www.example.com"},
+			wantShortID: []string{""},
+		},
+		{
+			name:        "only dest: serverNames fall back to dest host",
+			tlsSettings: mergeTLS(base, map[string]interface{}{"dest": "fallback.example.com"}),
+			wantTarget:  "fallback.example.com:443",
+			wantNames:   []string{"fallback.example.com"},
+			wantShortID: []string{""},
+		},
+		{
+			name:        "short_id array",
+			tlsSettings: mergeTLS(base, map[string]interface{}{"dest": nil, "server_name": "www.example.com", "short_id": []interface{}{"0123abcd", "ff"}}),
+			wantTarget:  "www.example.com:443",
+			wantNames:   []string{"www.example.com"},
+			wantShortID: []string{"0123abcd", "ff"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := &model.NodeSpec{TLS: 2, TLSSettings: tt.tlsSettings}
+			got := buildRealitySettings(spec)
+
+			if got["target"] != tt.wantTarget {
+				t.Errorf("target: got %v, want %q", got["target"], tt.wantTarget)
+			}
+			if _, ok := got["dest"]; ok {
+				t.Errorf("dest key should no longer be emitted, got %v", got["dest"])
+			}
+			if names, ok := got["serverNames"].([]string); !ok || !equalStrings(names, tt.wantNames) {
+				t.Errorf("serverNames: got %v, want %v", got["serverNames"], tt.wantNames)
+			}
+			if ids, ok := got["shortIds"].([]string); !ok || !equalStrings(ids, tt.wantShortID) {
+				t.Errorf("shortIds: got %v, want %v", got["shortIds"], tt.wantShortID)
+			}
+			if got["privateKey"] != base["private_key"] {
+				t.Errorf("privateKey: got %v", got["privateKey"])
+			}
+		})
+	}
+}
+
+// mergeTLS merges overrides into base, keeping explicit nil values (the panel
+// sends reality_settings fields as null, not absent).
+func mergeTLS(base, overrides map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(base)+len(overrides))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range overrides {
+		out[k] = v
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestApplyStreamSettings_TLS_ALPN(t *testing.T) {
+	nc := &model.NodeSpec{
+		TLS: 1,
+		TLSSettings: map[string]interface{}{
+			"server_name": "www.example.com",
+			"alpn":        []interface{}{"h2", "http/1.1"},
+		},
+	}
+	base := M{"streamSettings": M{}}
+	applyStreamSettings(base, nc, kernel.TLSCert{})
+
+	ss := base["streamSettings"].(M)
+	tlsSettings := ss["tlsSettings"].(M)
+	alpn, ok := tlsSettings["alpn"].([]interface{})
+	if !ok || len(alpn) != 2 {
+		t.Errorf("alpn passthrough: got %v", tlsSettings["alpn"])
+	}
+}
+
+func TestBuildTrojan_DoesNotMutateSpec(t *testing.T) {
+	nc := testNodeSpec(&panel.NodeConfig{
+		Protocol:   "trojan",
+		ServerPort: 443,
+	})
+	nc.TLS = 0
+	before := nc.TLS
+
+	buildTrojan(M{"streamSettings": M{}}, nc, testUsers, kernel.TLSCert{})
+
+	if nc.TLS != before {
+		t.Errorf("buildTrojan mutated shared NodeSpec.TLS: got %d, want %d", nc.TLS, before)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/go-viper/mapstructure/v2"
 )
 
 // M is a shorthand for building JSON-like maps
@@ -298,8 +300,10 @@ func buildTrojan(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
 	// we should enable a default TLS config to ensure the inbound can start.
 	ss, _ := base["streamSettings"].(M)
 	if security, ok := ss["security"].(string); !ok || (security != "tls" && security != "reality") {
-		nc.TLS = 1 // Force internal state to trigger TLS build in applyStreamSettings
-		applyStreamSettings(base, nc, tc)
+		// Force TLS on a copy — nc is shared (hashing, later rebuilds) and must stay untouched
+		specCopy := *nc
+		specCopy.TLS = 1
+		applyStreamSettings(base, &specCopy, tc)
 	}
 
 	return base
@@ -416,6 +420,11 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 	}
 	base["settings"] = M{"version": nc.Version, "clients": clients}
 
+	// xray-core hysteria has no obfs support; surface the dropped panel field
+	if nc.Obfs != "" {
+		nlog.Core().Warn("xray hysteria does not support obfs, ignoring", "obfs", nc.Obfs)
+	}
+
 	ss := M{
 		"network": "hysteria",
 		"hysteriaSettings": M{
@@ -524,7 +533,17 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 				h2Settings["path"] = v
 			}
 			if v, ok := nc.NetworkSettings["host"]; ok {
-				h2Settings["host"] = []interface{}{v}
+				// Panel may deliver host as an array; xray httpSettings.host is a list
+				switch hv := v.(type) {
+				case []interface{}:
+					if len(hv) > 0 {
+						h2Settings["host"] = hv
+					}
+				case string:
+					if hv != "" {
+						h2Settings["host"] = []interface{}{hv}
+					}
+				}
 			}
 		}
 		ss["httpSettings"] = h2Settings
@@ -572,6 +591,9 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 			if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
 				tlsSettings["serverName"] = sn
 			}
+			if alpn, ok := nc.TLSSettings["alpn"]; ok && alpn != nil {
+				tlsSettings["alpn"] = alpn
+			}
 			// ECH server-side: extract key from tls_settings.ech
 			if echKeys := extractECHServerKeys(nc.TLSSettings); echKeys != "" {
 				tlsSettings["echServerKeys"] = echKeys
@@ -608,6 +630,12 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 	base["streamSettings"] = ss
 }
 
+// buildRealitySettings builds xray realitySettings from the panel's
+// reality_settings block (delivered as TLSSettings when tls=2). Panel fields
+// default to null and server_port is a separate knob, so everything is
+// normalized here: target must resolve to host:port for xray-core to infer
+// its type, serverNames must be non-empty, and shortIds must be non-empty
+// (empty string = no short id).
 func buildRealitySettings(nc *model.NodeSpec) M {
 	reality := M{"show": false}
 
@@ -615,31 +643,62 @@ func buildRealitySettings(nc *model.NodeSpec) M {
 		return reality
 	}
 
-	if pk, ok := nc.TLSSettings["private_key"]; ok {
-		reality["privateKey"] = pk
-	}
-	if sid, ok := nc.TLSSettings["short_id"]; ok {
-		switch v := sid.(type) {
-		case string:
-			reality["shortIds"] = []string{v}
-		case []interface{}:
-			ids := make([]string, 0, len(v))
-			for _, item := range v {
-				ids = append(ids, fmt.Sprintf("%v", item))
-			}
-			reality["shortIds"] = ids
-		}
+	var settings struct {
+		PrivateKey string `mapstructure:"private_key"`
+		ShortID    any    `mapstructure:"short_id"`
+		Dest       string `mapstructure:"dest"`
+		ServerName string `mapstructure:"server_name"`
+		ServerPort int    `mapstructure:"server_port"`
 	}
 
-	if dest, ok := nc.TLSSettings["dest"]; ok {
-		destStr := fmt.Sprintf("%v", dest)
-		reality["dest"] = destStr
+	decoderConfig := &mapstructure.DecoderConfig{
+		Metadata:         nil,
+		Result:           &settings,
+		WeaklyTypedInput: true,
 	}
-	if sn, ok := nc.TLSSettings["server_name"]; ok {
-		reality["serverNames"] = []string{fmt.Sprintf("%v", sn)}
-		if _, exists := reality["dest"]; !exists {
-			reality["dest"] = fmt.Sprintf("%v:443", sn)
+	decoder, _ := mapstructure.NewDecoder(decoderConfig)
+	_ = decoder.Decode(nc.TLSSettings)
+
+	if settings.PrivateKey != "" {
+		reality["privateKey"] = settings.PrivateKey
+	}
+
+	switch v := settings.ShortID.(type) {
+	case string:
+		reality["shortIds"] = []string{v}
+	case []any:
+		ids := make([]string, 0, len(v))
+		for _, item := range v {
+			ids = append(ids, fmt.Sprintf("%v", item))
 		}
+		reality["shortIds"] = ids
+	default:
+		// xray-core requires non-empty shortIds; empty string means "no short id"
+		reality["shortIds"] = []string{""}
+	}
+
+	target := settings.Dest
+	if target == "" {
+		target = settings.ServerName
+	}
+	targetHost := target
+	if target != "" {
+		if _, _, err := net.SplitHostPort(target); err != nil {
+			port := 443
+			if settings.ServerPort > 0 {
+				port = settings.ServerPort
+			}
+			target = fmt.Sprintf("%s:%d", target, port)
+		}
+		targetHost = strings.SplitN(target, ":", 2)[0]
+		reality["target"] = target
+	}
+
+	if settings.ServerName != "" {
+		reality["serverNames"] = []string{settings.ServerName}
+	} else if targetHost != "" {
+		// xray-core requires non-empty serverNames even when only dest is set
+		reality["serverNames"] = []string{targetHost}
 	}
 
 	return reality
