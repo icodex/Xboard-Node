@@ -73,10 +73,6 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	inbound := buildInbound(nc, users, tc)
 	if inbound != nil {
 		cfg["inbounds"] = []M{inbound}
-	} else {
-		nlog.Core().Warn("xray: unsupported protocol, no inbound configured — node will not accept connections",
-			"protocol", nc.Protocol,
-			"supported", "vmess, vless, trojan, shadowsocks, hysteria, socks, http")
 	}
 
 	// Merge panel routes and static config routes

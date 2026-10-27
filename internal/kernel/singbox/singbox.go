@@ -94,6 +94,12 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	defer s.mu.Unlock()
 
 	cfgMap := buildConfig(s.cfg, nodeConfig, users, tls)
+	// A config without inbounds means the node protocol is unsupported by
+	// the kernel — refuse to start so the service layer never reports a
+	// running node that cannot accept connections.
+	if inbounds, _ := cfgMap["inbounds"].([]M); len(inbounds) == 0 {
+		return fmt.Errorf("protocol %q produced no inbound (unsupported by kernel); node will not accept connections", nodeConfig.Protocol)
+	}
 	data, err := json.Marshal(cfgMap)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)

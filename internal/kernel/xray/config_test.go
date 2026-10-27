@@ -33,6 +33,27 @@ func testRouteRules(r []panel.RouteRule) []model.RouteRule {
 	return model.NodeSpecFromPanel(&panel.NodeConfig{Routes: r}).Routes
 }
 
+// --- marshalConfig missing-inbound guard ---
+
+func TestMarshalConfig_RejectsMissingInbound(t *testing.T) {
+	// hysteria v1 is not supported by the xray kernel: buildInbound returns
+	// nil and Start must refuse instead of running an empty instance.
+	nc := &panel.NodeConfig{
+		Protocol:   "hysteria",
+		ServerPort: 10015,
+		Version:    1,
+		ServerName: "test.local",
+	}
+	if _, err := marshalConfig(testKernelCfg, testNodeSpec(nc), testUsers, kernel.TLSCert{}); err == nil {
+		t.Error("expected error for protocol without inbound, got nil")
+	}
+
+	ok := &panel.NodeConfig{Protocol: "vmess", ServerPort: 10004}
+	if _, err := marshalConfig(testKernelCfg, testNodeSpec(ok), testUsers, kernel.TLSCert{}); err != nil {
+		t.Errorf("expected vmess config to marshal, got %v", err)
+	}
+}
+
 func TestBuildConfig_OutboundPriority(t *testing.T) {
 	kcfg := config.KernelConfig{
 		LogLevel: "info",

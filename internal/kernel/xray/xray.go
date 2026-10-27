@@ -647,8 +647,14 @@ func (x *Xray) ensureGeoData(nc *model.NodeSpec) {
 }
 
 // marshalConfig builds the xray JSON config and returns the raw bytes.
+// A config without inbounds means the node protocol is unsupported by the
+// kernel — refuse to start so the service layer never reports a running node
+// that cannot accept connections.
 func marshalConfig(cfg config.KernelConfig, nc *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) ([]byte, error) {
 	cfgMap := buildConfig(cfg, nc, users, tls)
+	if inbounds, _ := cfgMap["inbounds"].([]M); len(inbounds) == 0 {
+		return nil, fmt.Errorf("protocol %q produced no inbound (unsupported by kernel); node will not accept connections", nc.Protocol)
+	}
 	data, err := json.MarshalIndent(cfgMap, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)

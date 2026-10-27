@@ -489,6 +489,20 @@ func TestBuildInbound_Unknown(t *testing.T) {
 	}
 }
 
+// --- Start missing-inbound guard ---
+
+func TestStart_RejectsMissingInbound(t *testing.T) {
+	s := New(config.KernelConfig{LogLevel: "warn"})
+	nc := &panel.NodeConfig{Protocol: "unknown-proto", ServerPort: 999}
+	err := s.Start(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err == nil {
+		t.Fatal("expected error for protocol without inbound, got nil")
+	}
+	if s.box != nil {
+		t.Error("kernel must not create an instance when no inbound can be built")
+	}
+}
+
 // --- buildConfig ---
 
 func TestBuildConfig(t *testing.T) {
