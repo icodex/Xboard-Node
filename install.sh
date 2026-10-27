@@ -27,7 +27,7 @@ DEFAULT_ACTION="install"
 DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
 DEFAULT_KERNEL_LOG_LEVEL="warn"
-DEFAULT_DOWNLOAD_BASE="https://github.com/cedar2025/xboard-node/releases"
+DEFAULT_DOWNLOAD_BASE="https://github.com/icodex/xboard-node/releases"
 
 ACTION="${DEFAULT_ACTION}"
 MODE=""
@@ -592,7 +592,7 @@ render_service() {
     cat >"$TMP_DIR/${SERVICE_NAME}" <<EOF_UNIT
 [Unit]
 Description=Xboard Node Backend
-Documentation=https://github.com/cedar2025/xboard-node
+Documentation=https://github.com/icodex/xboard-node
 After=network-online.target
 Wants=network-online.target
 
