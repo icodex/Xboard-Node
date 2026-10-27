@@ -720,9 +720,11 @@ func (c *Config) validate() error {
 		}
 	}
 	switch c.Kernel.Type {
-	case "singbox", "xray":
+	case "singbox", "xray", "auto", "sing-box", "":
+		// "" resolves to singbox in setDefaultsFrom; "sing-box" is accepted
+		// for symmetry with normalizeKernelType.
 	default:
-		return fmt.Errorf("kernel.type must be 'singbox' or 'xray', got '%s'", c.Kernel.Type)
+		return fmt.Errorf("kernel.type must be 'singbox', 'xray' or 'auto', got '%s'", c.Kernel.Type)
 	}
 	if c.Cert.AutoTLS && c.Cert.Domain == "" {
 		return fmt.Errorf("cert.domain is required when cert.auto_tls is enabled")

@@ -38,6 +38,10 @@ type Service struct {
 	speedTracker *limiter.SpeedTracker
 	cert         *cert.Manager
 
+	// kernelMu guards kernel construction/swap when kernel.type resolves to
+	// auto: ensureKernelFor may replace s.kernel mid-run on config changes.
+	kernelMu sync.Mutex
+
 	lastConfig *model.NodeSpec
 	lastUsers  []model.UserSpec
 
@@ -139,25 +143,13 @@ func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Serv
 func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	certMgr := cert.NewManager(cfg.Cert)
 
-	var k kernel.Kernel
-	switch cfg.Kernel.Type {
-	case "singbox":
-		k = singbox.New(cfg.Kernel)
-	case "xray":
-		k = xray.New(cfg.Kernel)
-	default:
-		nlog.Core().Warn("unsupported kernel type, defaulting to sing-box", "type", cfg.Kernel.Type)
-		k = singbox.New(cfg.Kernel)
-	}
-
 	l := limiter.New()
 	st := limiter.NewSpeedTracker(l)
 
-	return &Service{
+	s := &Service{
 		cfg:          cfg,
 		source:       cp,
 		sink:         cp,
-		kernel:       k,
 		tracker:      tracker.New(),
 		limiter:      l,
 		speedTracker: st,
@@ -166,6 +158,70 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
+	// kernel.type auto defers kernel construction until the first node spec
+	// arrives; concrete types build immediately (behaviour unchanged).
+	s.kernel = s.buildKernel(cfg.Kernel.Type)
+	if s.kernel == nil {
+		s.kernel = singbox.New(cfg.Kernel) // placeholder until first spec resolves
+	}
+	return s
+}
+
+// buildKernel constructs a kernel for a concrete type. Returns nil for
+// "auto"/empty — the caller must resolve via ensureKernelFor first.
+func (s *Service) buildKernel(kernelType string) kernel.Kernel {
+	switch strings.ToLower(strings.TrimSpace(kernelType)) {
+	case "singbox", "sing-box", "":
+		return singbox.New(s.cfg.Kernel)
+	case "xray":
+		return xray.New(s.cfg.Kernel)
+	default:
+		return nil
+	}
+}
+
+// ensureKernelFor returns a kernel compatible with the given spec, building
+// (or rebuilding, on hot config change) it when the resolved type differs.
+// Callers must hold no other service locks; kernel ops stay on the main loop.
+func (s *Service) ensureKernelFor(spec *model.NodeSpec) (kernel.Kernel, error) {
+	s.kernelMu.Lock()
+	defer s.kernelMu.Unlock()
+
+	resolved := model.ResolveKernelForNode(spec, s.cfg.Kernel)
+	current := s.kernel
+	if current != nil {
+		if name := strings.ToLower(strings.TrimSpace(s.cfg.Kernel.Type)); name != "auto" && name != "" {
+			// Concrete kernel.type: never swap.
+			return current, nil
+		}
+		// Auto: compare against what the running kernel implements.
+		if matchesResolvedKernel(current, resolved) {
+			return current, nil
+		}
+		current.Stop()
+		nlog.Core().Info("kernel auto-switch on config change",
+			"protocol", spec.Protocol, "network", spec.Network, "kernel", resolved)
+	}
+
+	k := s.buildKernel(resolved)
+	if k == nil {
+		return nil, fmt.Errorf("unsupported kernel type %q resolved for protocol %q", resolved, spec.Protocol)
+	}
+	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
+	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
+	s.kernel = k
+	return k, nil
+}
+
+// matchesResolvedKernel reports whether k is the kernel auto mode resolved to.
+func matchesResolvedKernel(k kernel.Kernel, resolved string) bool {
+	switch resolved {
+	case "singbox":
+		return strings.HasPrefix(k.Name(), "sing-box")
+	case "xray":
+		return k.Name() == "xray"
+	}
+	return false
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -287,6 +343,9 @@ func (s *Service) initialSetup(ctx context.Context) error {
 			return nil
 		}
 		return fmt.Errorf("initial config is nil")
+	}
+	if err := s.resolveAutoKernel(bootstrap.Config); err != nil {
+		return err
 	}
 	if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), bootstrap.Config, s.cert.TLSCert()); err != nil {
 		return err
@@ -543,6 +602,10 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if newConfigHash == s.lastConfigHash {
 			return
 		}
+		if err := s.resolveAutoKernel(event.Config); err != nil {
+			nlog.Core().Warn("kernel auto-selection failed, ignoring update", "error", err)
+			return
+		}
 		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
 			return
@@ -652,6 +715,10 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	}
 
 	if result.config != nil {
+		if err := s.resolveAutoKernel(result.config); err != nil {
+			nlog.Core().Warn("kernel auto-selection failed", "error", err)
+			result.config = nil
+		}
 		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("runtime config validation failed", "error", err)
 			result.config = nil
@@ -1144,6 +1211,27 @@ func (s *Service) reportDevices() {
 }
 
 // ─── Runtime validation ─────────────────────────────────────────────────
+
+// resolveAutoKernel aligns s.kernel with the spec when kernel.type is auto.
+// It is a no-op for concrete kernel types. Call before validateNodeRuntime so
+// the protocol whitelist and transport checks run against the right kernel.
+// Runs on the main loop only (initialSetup / handleWSEvent / applyPullResult).
+func (s *Service) resolveAutoKernel(spec *model.NodeSpec) error {
+	name := strings.ToLower(strings.TrimSpace(s.cfg.Kernel.Type))
+	if name != "auto" {
+		return nil
+	}
+	if spec == nil {
+		return nil
+	}
+	if _, err := s.ensureKernelFor(spec); err != nil {
+		return err
+	}
+	resolved := model.ResolveKernelForNode(spec, s.cfg.Kernel)
+	nlog.Core().Info("kernel auto-selected",
+		"protocol", spec.Protocol, "network", spec.Network, "kernel", resolved)
+	return nil
+}
 
 func validateNodeRuntime(cfg *config.Config, kcfgSupported []string, spec *model.NodeSpec, tls kernel.TLSCert) error {
 	if spec == nil {

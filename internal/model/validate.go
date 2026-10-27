@@ -20,6 +20,14 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if err != nil {
 		return fmt.Errorf("normalize kernel type: %w", err)
 	}
+	if kernelType == "auto" {
+		// Validate against the concrete kernel auto-selection would pick.
+		kernelType = ResolveKernelForNode(n, kcfg)
+	}
+
+	if c := strings.ToLower(strings.TrimSpace(n.Cipher)); strings.HasPrefix(c, "2022-blake3-chacha") {
+		return fmt.Errorf("cipher %q cannot serve multiple users: SIP022 identity headers (EIH) are AES-only; use a 2022-blake3-aes-*-gcm cipher", n.Cipher)
+	}
 
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)
 	if err != nil {
@@ -83,12 +91,67 @@ func ResolveKernelForTransport(network, configuredKernel string) string {
 	return configuredKernel
 }
 
+// singboxOnlyProtocols lists protocols only the sing-box kernel serves.
+// Verified against the 31-node dual-kernel sweep (docs-protocol-support.md).
+var singboxOnlyProtocols = map[string]bool{
+	"tuic":     true,
+	"anytls":   true,
+	"naive":    true,
+	"socks":    true,
+	"http":     true,
+	"mieru":    true,
+	"hysteria": true, // v1; xray only takes hysteria2
+}
+
+// ResolveKernelForNode picks the kernel for a node spec.
+//
+// With an explicit configured kernel it only flips when the transport is
+// unsupported (machine-mode auto-switch semantics); other conflicts surface
+// as validation errors. With kernel.type "auto" (or empty) it resolves fully:
+// explicit panel kernel_type first, then sing-box-only protocols, then
+// transport requirements, then vmess+Reality (sing-box would silently run
+// plaintext), then the sing-box default.
+func ResolveKernelForNode(n *NodeSpec, kcfg config.KernelConfig) string {
+	configured := strings.ToLower(strings.TrimSpace(kcfg.Type))
+	if configured != "auto" && configured != "" {
+		if n == nil {
+			return configured
+		}
+		return ResolveKernelForTransport(n.Network, configured)
+	}
+	if n == nil {
+		return "singbox"
+	}
+	if k := strings.ToLower(strings.TrimSpace(n.KernelType)); k != "" && k != "auto" {
+		if norm, err := normalizeKernelType(k); err == nil {
+			return norm
+		}
+	}
+	protocol := strings.ToLower(strings.TrimSpace(n.Protocol))
+	if singboxOnlyProtocols[protocol] {
+		return "singbox"
+	}
+	net := strings.ToLower(strings.TrimSpace(n.Network))
+	if singboxUnsupportedTransports[net] {
+		return "xray"
+	}
+	if xrayUnsupportedTransports[net] {
+		return "singbox"
+	}
+	if protocol == "vmess" && n.TLS == 2 {
+		return "xray"
+	}
+	return "singbox"
+}
+
 func normalizeKernelType(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "singbox", "sing-box":
 		return "singbox", nil
 	case "xray":
 		return "xray", nil
+	case "auto":
+		return "auto", nil
 	default:
 		return "", fmt.Errorf("unsupported kernel type %q", value)
 	}
