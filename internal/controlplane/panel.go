@@ -45,6 +45,12 @@ func (p *PanelControlPlane) Initial(ctx context.Context, metricsFn func() map[st
 	bootstrap := Bootstrap{PushInterval: hs.Settings.PushInterval, PullInterval: hs.Settings.PullInterval}
 	if hs.WebSocket.Enabled && hs.WebSocket.WSURL != "" {
 		bootstrap.Push = p.newPushClient(metricsFn, events, statuses, hs.WebSocket.WSURL)
+		// Panels don't return settings in the handshake; fall back to the
+		// config's base_config so panel-tuned intervals still apply (best
+		// effort — the WS full sync delivers the config regardless).
+		if cfg, err := p.client.GetConfig(); err == nil {
+			fillIntervalsFromConfig(&bootstrap, cfg)
+		}
 		return bootstrap, nil
 	}
 
@@ -56,6 +62,7 @@ func (p *PanelControlPlane) Initial(ctx context.Context, metricsFn func() map[st
 	if configSnapshot == nil {
 		return Bootstrap{}, fmt.Errorf("initial config is nil")
 	}
+	fillIntervalsFromConfig(&bootstrap, configSnapshot)
 	users, err := p.client.GetUsers()
 	if err != nil {
 		return Bootstrap{}, fmt.Errorf("initial user fetch: %w", err)
@@ -66,6 +73,21 @@ func (p *PanelControlPlane) Initial(ctx context.Context, metricsFn func() map[st
 	}
 	bootstrap.Users = model.UserSpecsFromPanel(users)
 	return bootstrap, nil
+}
+
+// fillIntervalsFromConfig backfills push/pull intervals from the node
+// config's base_config when the handshake did not carry settings (panels
+// omit them today, so NodeSpecFromPanel would otherwise drop them).
+func fillIntervalsFromConfig(b *Bootstrap, cfg *panel.NodeConfig) {
+	if cfg == nil {
+		return
+	}
+	if b.PushInterval == 0 {
+		b.PushInterval = cfg.BaseConfig.PushInterval
+	}
+	if b.PullInterval == 0 {
+		b.PullInterval = cfg.BaseConfig.PullInterval
+	}
 }
 
 func (p *PanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {

@@ -93,3 +93,70 @@ func TestTranslateWSEventRejectsUnsupportedProtocolForKernel(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestPanelControlPlaneInitialBackfillsIntervalsFromBaseConfig(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/server/handshake", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"websocket":{"enabled":false}}`))
+	})
+	mux.HandleFunc("/api/v1/server/UniProxy/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"shadowsocks","server_port":8388,"cipher":"aes-256-gcm","base_config":{"push_interval":300,"pull_interval":120}}`))
+	})
+	mux.HandleFunc("/api/v1/server/UniProxy/user", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"users":[]}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cp := NewPanelControlPlane(config.PanelConfig{URL: server.URL, Token: "token", NodeID: 1}, config.WSConfig{}, config.KernelConfig{Type: "singbox"})
+	boot, err := cp.Initial(context.Background(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("initial: %v", err)
+	}
+	if boot.PushInterval != 300 || boot.PullInterval != 120 {
+		t.Fatalf("intervals = %d/%d, want 300/120", boot.PushInterval, boot.PullInterval)
+	}
+}
+
+func TestPanelControlPlaneInitialHandshakeSettingsWin(t *testing.T) {
+	server := newPanelTestServer(`{"protocol":"shadowsocks","server_port":8388,"cipher":"aes-256-gcm","base_config":{"push_interval":300,"pull_interval":120}}`)
+	defer server.Close()
+
+	cp := NewPanelControlPlane(config.PanelConfig{URL: server.URL, Token: "token", NodeID: 1}, config.WSConfig{}, config.KernelConfig{Type: "singbox"})
+	boot, err := cp.Initial(context.Background(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("initial: %v", err)
+	}
+	if boot.PushInterval != 60 || boot.PullInterval != 60 {
+		t.Fatalf("intervals = %d/%d, want 60/60 from handshake settings", boot.PushInterval, boot.PullInterval)
+	}
+}
+
+func TestMachineControlPlaneInitialBackfillsIntervalsFromBaseConfig(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/server/handshake", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"websocket":{"enabled":false}}`))
+	})
+	mux.HandleFunc("/api/v2/server/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"shadowsocks","server_port":8388,"cipher":"aes-256-gcm","base_config":{"push_interval":300,"pull_interval":120}}`))
+	})
+	mux.HandleFunc("/api/v2/server/user", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"users":[]}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := panelapi.NewClient(config.PanelConfig{URL: server.URL, Token: "token", MachineID: 7, NodeID: 2})
+	cp := NewMachinePanelControlPlane(client, config.KernelConfig{Type: "singbox"}, nil, nil)
+	boot, err := cp.Initial(context.Background(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("initial: %v", err)
+	}
+	if boot.PushInterval != 300 || boot.PullInterval != 120 {
+		t.Fatalf("intervals = %d/%d, want 300/120", boot.PushInterval, boot.PullInterval)
+	}
+}

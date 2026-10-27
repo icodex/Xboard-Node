@@ -72,6 +72,7 @@ func (p *MachinePanelControlPlane) Initial(
 	if configSnapshot == nil {
 		return Bootstrap{}, fmt.Errorf("machine initial config is nil")
 	}
+	fillIntervalsFromConfig(&bootstrap, configSnapshot)
 	users, err := p.client.GetUsers()
 	if err != nil {
 		return Bootstrap{}, fmt.Errorf("machine initial users: %w", err)

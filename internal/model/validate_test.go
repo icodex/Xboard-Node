@@ -128,6 +128,19 @@ func TestValidateNodeSpec_SS2022ChachaRejected(t *testing.T) {
 	}
 }
 
+func TestValidateNodeSpec_SSPluginRejected(t *testing.T) {
+	err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm", Plugin: "simple-obfs", PluginOpt: "obfs=http"}, config.KernelConfig{Type: "singbox"})
+	if err == nil {
+		t.Fatal("expected rejection, got nil")
+	}
+	if !contains(err.Error(), "SIP003") {
+		t.Errorf("error should mention SIP003 plugins, got %q", err.Error())
+	}
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "singbox"}); err != nil {
+		t.Errorf("no plugin: unexpected error %v", err)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

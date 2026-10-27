@@ -29,6 +29,13 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return fmt.Errorf("cipher %q cannot serve multiple users: SIP022 identity headers (EIH) are AES-only; use a 2022-blake3-aes-*-gcm cipher", n.Cipher)
 	}
 
+	// Neither kernel implements SIP003 plugins; serving such a node would run
+	// a plaintext-capable inbound while clients try to dial with the plugin
+	// from the subscription link and fail without any server-side hint.
+	if n.Protocol == "shadowsocks" && strings.TrimSpace(n.Plugin) != "" {
+		return fmt.Errorf("shadowsocks plugin %q is not supported: neither kernel implements SIP003 plugins; disable the plugin on the panel", n.Plugin)
+	}
+
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)
 	if err != nil {
 		return fmt.Errorf("collect additional outbound tags: %w", err)
