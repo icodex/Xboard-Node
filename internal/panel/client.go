@@ -280,41 +280,6 @@ func (c *Client) GetUsers() ([]User, error) {
 	return usersResp.Users, nil
 }
 
-// PushTraffic submits per-user traffic data
-func (c *Client) PushTraffic(data map[int][2]int64) error {
-	if len(data) == 0 {
-		return nil
-	}
-	payload := make(map[string]interface{}, len(data))
-	for uid, traffic := range data {
-		payload[strconv.Itoa(uid)] = traffic
-	}
-	return c.postJSON("/api/v1/server/UniProxy/push", payload)
-}
-
-// PushAlive submits online user IPs
-func (c *Client) PushAlive(data map[int][]string) error {
-	if len(data) == 0 {
-		return nil
-	}
-	payload := make(map[string]interface{}, len(data))
-	for uid, ips := range data {
-		payload[strconv.Itoa(uid)] = ips
-	}
-	return c.postJSON("/api/v1/server/UniProxy/alive", payload)
-}
-
-// PushStatus submits system status to the panel
-func (c *Client) PushStatus(cpu float64, mem, swap, disk [2]uint64) error {
-	payload := map[string]interface{}{
-		"cpu":  cpu,
-		"mem":  map[string]interface{}{"total": mem[0], "used": mem[1]},
-		"swap": map[string]interface{}{"total": swap[0], "used": swap[1]},
-		"disk": map[string]interface{}{"total": disk[0], "used": disk[1]},
-	}
-	return c.postJSON("/api/v1/server/UniProxy/status", payload)
-}
-
 // ResetETags clears cached ETags, forcing full responses
 func (c *Client) ResetETags() {
 	c.configETag = ""

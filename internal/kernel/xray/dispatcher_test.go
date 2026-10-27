@@ -32,18 +32,14 @@ func TestLimitDispatcher_DeviceLimitCheck(t *testing.T) {
 
 	emailToUID := make(map[string]int)
 	deviceLimits := make(map[string]int)
-	speedLimits := make(map[string]int)
 	for _, u := range users {
 		email := userEmail(u.ID)
 		emailToUID[email] = u.ID
 		if u.DeviceLimit > 0 {
 			deviceLimits[email] = u.DeviceLimit
 		}
-		if u.SpeedLimit > 0 {
-			speedLimits[email] = u.SpeedLimit
-		}
 	}
-	ld.UpdateLimits(emailToUID, deviceLimits, speedLimits)
+	ld.UpdateLimits(emailToUID, deviceLimits)
 
 	email1 := userEmail(1)
 
@@ -82,7 +78,7 @@ func TestLimitDispatcher_DelConn(t *testing.T) {
 
 	email := userEmail(1)
 	deviceLimits := map[string]int{email: 2}
-	ld.UpdateLimits(map[string]int{email: 1}, deviceLimits, nil)
+	ld.UpdateLimits(map[string]int{email: 1}, deviceLimits)
 
 	// Add 2 IPs
 	ld.checkDeviceLimit(email, "1.1.1.1")
@@ -107,7 +103,7 @@ func TestLimitDispatcher_GetConnectionState(t *testing.T) {
 
 	email1 := userEmail(1)
 	email2 := userEmail(2)
-	ld.UpdateLimits(map[string]int{email1: 1, email2: 2}, nil, nil)
+	ld.UpdateLimits(map[string]int{email1: 1, email2: 2}, nil)
 
 	ic1 := &ipCounter{}
 	r1 := &atomic.Int64{}
@@ -166,7 +162,7 @@ func TestLimitDispatcher_UnlimitedUserFastPath(t *testing.T) {
 
 	email := userEmail(1)
 	// No device limit set for this user
-	ld.UpdateLimits(map[string]int{email: 1}, nil, nil)
+	ld.UpdateLimits(map[string]int{email: 1}, nil)
 
 	// Should use fast path (sync.Map), no lock needed
 	for i := 0; i < 100; i++ {
@@ -188,11 +184,10 @@ func TestLimitDispatcher_UnlimitedUserFastPath(t *testing.T) {
 	}
 }
 
-
 func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 	ld := newTestDispatcher()
 	email := userEmail(1)
-	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1}, nil)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1})
 
 	origReader := nopReader{}
 	origWriter := &closeTrackingWriter{Writer: buf.Discard, onClose: func() {}}
@@ -211,7 +206,7 @@ func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	ld := newTestDispatcher()
 	email := userEmail(1)
-	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1}, nil)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1})
 	if ld.checkDeviceLimit(email, "1.1.1.1") {
 		t.Fatal("first connection should be allowed")
 	}
@@ -242,7 +237,7 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 func TestLimitDispatcher_GetConnectionState_ConcurrentWithClose(t *testing.T) {
 	ld := newTestDispatcher()
 	email := userEmail(1)
-	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1000}, nil)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1000})
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup

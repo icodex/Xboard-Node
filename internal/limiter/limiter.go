@@ -2,21 +2,18 @@ package limiter
 
 import (
 	"sync"
-	"sync/atomic"
 
 	"github.com/cedar2025/xboard-node/internal/model"
 )
 
-// Limiter enforces per-user device limits and detects removed users.
+// Limiter provides per-user limit lookups for kernel gate-keeping.
 type Limiter struct {
 	mu    sync.RWMutex
-	users map[int]model.UserSpec
+	users map[int]model.UserSpec // current user specs (speed limits, device limits)
 
 	// uuidDeviceLimit provides O(1) UUID→device-limit lookup for the
 	// kernel gate-keeping hot path (called per new connection).
 	uuidDeviceLimit map[string]int
-
-	deviceLimitEvents atomic.Uint64
 }
 
 func New() *Limiter {
@@ -26,23 +23,14 @@ func New() *Limiter {
 	}
 }
 
-// UpdateUsers refreshes the user limit configuration and returns
-// the IDs of users that were present before but are now removed.
-func (l *Limiter) UpdateUsers(users []model.UserSpec) []int {
+// UpdateUsers refreshes the user limit configuration.
+func (l *Limiter) UpdateUsers(users []model.UserSpec) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	newUsers := make(map[int]model.UserSpec, len(users))
 	for _, u := range users {
 		newUsers[u.ID] = u
-	}
-
-	// Find removed users
-	var removed []int
-	for id := range l.users {
-		if _, ok := newUsers[id]; !ok {
-			removed = append(removed, id)
-		}
 	}
 
 	l.users = newUsers
@@ -55,22 +43,6 @@ func (l *Limiter) UpdateUsers(users []model.UserSpec) []int {
 		}
 	}
 	l.uuidDeviceLimit = idx
-
-	return removed
-}
-
-// LimiterMetrics holds aggregated limiter statistics.
-type LimiterMetrics struct {
-	// DeviceLimitEvents is the total number of times a user exceeded
-	// the configured device limit (since process start).
-	DeviceLimitEvents uint64
-}
-
-// SnapshotMetrics returns a snapshot of limiter metrics.
-func (l *Limiter) SnapshotMetrics() LimiterMetrics {
-	return LimiterMetrics{
-		DeviceLimitEvents: l.deviceLimitEvents.Load(),
-	}
 }
 
 // GetDeviceLimitByUUID returns the device limit for a user identified by UUID.

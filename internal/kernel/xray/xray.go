@@ -15,9 +15,9 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
+	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/stats"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	xrayProxy "github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
@@ -32,8 +32,8 @@ import (
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
-	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
 const (
@@ -82,17 +82,6 @@ func New(cfg config.KernelConfig) *Xray {
 }
 
 func (x *Xray) Name() string { return "xray" }
-
-func (x *Xray) Capabilities() kernel.Capabilities {
-	return kernel.Capabilities{
-		PerUserSpeedLimit:    true,
-		DeviceLimit:          true,
-		BuiltInTrafficStats:  true,
-		AliveIPTracking:      true,
-		ForceCloseConnection: false,
-		ForceCloseUser:       false,
-	}
-}
 
 func (x *Xray) Protocols() []string {
 	return []string{
@@ -272,17 +261,6 @@ func (x *Xray) GetUserTraffic(_ context.Context) (traffic map[int][2]int64, aliv
 	return traffic, aliveIPs, connCount, nil
 }
 
-func (x *Xray) CloseConnection(_ context.Context, _ string) error {
-	// No-op: xray doesn't support force-closing individual connections.
-	// User removal goes through RemoveUsers which removes the inbound user.
-	return nil
-}
-
-func (x *Xray) CloseUserConnections(_ context.Context, _ string) error {
-	// No-op: handled by RemoveUsers at the xray core level.
-	return nil
-}
-
 // SetSpeedLimitFunc wires xray's patched bandwidth feature to the shared
 // per-user limiter callback used by the service layer. Unlike the old no-op
 // behavior, xray now consumes this callback to support dynamic speed updates.
@@ -342,7 +320,7 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 		x.users = merged
 		x.mu.Unlock()
 		x.updateDispatcherLimits(merged)
-	x.updateBandwidthLimits(merged)
+		x.updateBandwidthLimits(merged)
 		return 0, nil
 	}
 
@@ -840,7 +818,7 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 		}
 	}
 
-	ld.UpdateLimits(emailToUID, deviceLimits, nil)
+	ld.UpdateLimits(emailToUID, deviceLimits)
 }
 
 // xrayCreationMu serialises xrayCore.New() + globalLimitDispatcher capture

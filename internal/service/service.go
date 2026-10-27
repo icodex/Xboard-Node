@@ -1036,7 +1036,6 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 
 	// Active connections (last measured during tracker.Process()).
 	m["active_connections"] = s.tracker.ActiveConnections()
-	m["total_connections"] = s.tracker.TotalConnections()
 	m["active_users"] = len(online)
 	m["total_users"] = len(lastUsers)
 
@@ -1080,13 +1079,6 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 	m["ws"] = map[string]interface{}{
 		"enabled":   wsEnabled,
 		"connected": wsConnected,
-	}
-
-	// Limiter metrics.
-	lm := s.limiter.SnapshotMetrics()
-	m["limits"] = map[string]interface{}{
-		"device_limit_events": lm.DeviceLimitEvents,
-		"speed_limited_users": s.speedTracker.LimitedUserCount(),
 	}
 
 	return m

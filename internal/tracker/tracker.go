@@ -6,8 +6,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-
-	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
 // snapshot is an immutable point-in-time view of tracker state.
@@ -236,23 +234,10 @@ func (t *Tracker) CurrentOnline() map[int]int {
 	return cp
 }
 
-// LogStats logs current tracking statistics.
-// Lock-free: reads from live snapshot.
-func (t *Tracker) LogStats() {
-	s := t.live.Load()
-	nlog.TrackerStats(s.connCount, len(s.online))
-}
-
 // ActiveConnections returns the last observed active connection count.
 // Lock-free: reads from live snapshot.
 func (t *Tracker) ActiveConnections() int {
 	return t.live.Load().connCount
-}
-
-// TotalConnections is deprecated — no longer tracked per-connection.
-// Returns 0 for backward compatibility.
-func (t *Tracker) TotalConnections() int64 {
-	return 0
 }
 
 // InboundSpeed returns the last observed inbound (download) speed in bytes/second.

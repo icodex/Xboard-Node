@@ -14,15 +14,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func TestSingBoxCapabilities(t *testing.T) {
+func TestSingBoxProtocols(t *testing.T) {
 	s := New(config.KernelConfig{Type: "sing-box"})
-	caps := s.Capabilities()
-	if !caps.PerUserSpeedLimit || !caps.DeviceLimit || !caps.AliveIPTracking || !caps.ForceCloseUser {
-		t.Fatalf("unexpected sing-box capabilities: %+v", caps)
-	}
-	if caps.BuiltInTrafficStats || caps.ForceCloseConnection {
-		t.Fatalf("unexpected sing-box capabilities: %+v", caps)
-	}
 	protocols := s.Protocols()
 	found := false
 	for _, protocol := range protocols {
@@ -35,8 +28,6 @@ func TestSingBoxCapabilities(t *testing.T) {
 		t.Fatalf("Protocols() missing hysteria: %v", protocols)
 	}
 }
-
-
 
 type testConn struct {
 	closed bool
@@ -60,11 +51,11 @@ func (c *testConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (c *testConn) Close() error { c.closed = true; return nil }
-func (c *testConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
-func (c *testConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
-func (c *testConn) SetDeadline(time.Time) error { return nil }
-func (c *testConn) SetReadDeadline(time.Time) error { return nil }
+func (c *testConn) Close() error                     { c.closed = true; return nil }
+func (c *testConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *testConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *testConn) SetDeadline(time.Time) error      { return nil }
+func (c *testConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *testConn) SetWriteDeadline(time.Time) error { return nil }
 
 func testInboundContext(uuid, ip string) adapter.InboundContext {
@@ -160,23 +151,6 @@ func TestConnTrackerCheckDeviceGateMergesFreshGlobalDevices(t *testing.T) {
 	}
 	if tracker.checkDeviceGate(us, 1, "9.9.9.9", 2) {
 		t.Fatal("existing global IP should still be allowed")
-	}
-}
-
-func TestConnTrackerCloseByIDClosesTrackedConnection(t *testing.T) {
-	tracker := NewConnTracker(0)
-	tracker.SetUserMap(map[string]int{"uuid-1": 1})
-	base := &testConn{}
-	wrapped := tracker.RoutedConnection(context.Background(), base, testInboundContext("uuid-1", "1.1.1.1"), nil, nil)
-	tracked, ok := wrapped.(*trackedConn)
-	if !ok {
-		t.Fatalf("wrapped type = %T, want *trackedConn", wrapped)
-	}
-	if !tracker.CloseByID(tracked.connID) {
-		t.Fatal("CloseByID() = false, want true")
-	}
-	if !base.closed {
-		t.Fatal("expected underlying connection to be closed")
 	}
 }
 

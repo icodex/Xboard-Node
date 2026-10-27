@@ -71,17 +71,6 @@ var _ kernel.Kernel = (*SingBox)(nil)
 
 func (s *SingBox) Name() string { return "sing-box" }
 
-func (s *SingBox) Capabilities() kernel.Capabilities {
-	return kernel.Capabilities{
-		PerUserSpeedLimit:    true,
-		DeviceLimit:          true,
-		BuiltInTrafficStats:  false,
-		AliveIPTracking:      true,
-		ForceCloseConnection: false,
-		ForceCloseUser:       true,
-	}
-}
-
 func (s *SingBox) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
@@ -208,71 +197,8 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 	tlsChanged := !bytes.Equal(s.tls.CertPEM, tls.CertPEM) || !bytes.Equal(s.tls.KeyPEM, tls.KeyPEM)
 	configChanged := tlsChanged || s.nodeConfig == nil || kernel.ComputeHash(nodeConfig, users) != kernel.ComputeHash(s.nodeConfig, s.users)
 
-	for _, inb := range opts.Inbounds {
-		tag := inb.Tag
-		if !configChanged {
-			if existing, ok := im.Get(tag); ok && existing.Type() == inb.Type {
-				var err error
-				switch v := existing.(type) {
-				case adapter.UpdatableInbound[option.VMessUser]:
-					if opts, ok := inb.Options.(*option.VMessInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.VLESSUser]:
-					if opts, ok := inb.Options.(*option.VLESSInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.TrojanUser]:
-					if opts, ok := inb.Options.(*option.TrojanInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.Hysteria2User]:
-					if opts, ok := inb.Options.(*option.Hysteria2InboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableShadowsocksInbound:
-					if opts, ok := inb.Options.(*option.ShadowsocksInboundOptions); ok {
-						err = v.UpdateUsersByOptions(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.TUICUser]:
-					if opts, ok := inb.Options.(*option.TUICInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.AnyTLSUser]:
-					if opts, ok := inb.Options.(*option.AnyTLSInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.MieruUser]:
-					if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[auth.User]:
-					switch opts := inb.Options.(type) {
-					case *option.NaiveInboundOptions:
-						err = v.UpdateUsers(opts.Users)
-					case *option.SocksInboundOptions:
-						err = v.UpdateUsers(opts.Users)
-					case *option.HTTPMixedInboundOptions:
-						err = v.UpdateUsers(opts.Users)
-					}
-				}
-				if err == nil {
-					continue
-				}
-				nlog.Core().Warn("incremental update failed, falling back to recreate", "tag", tag, "error", err)
-			}
-		}
-
-		// Config mismatch or incremental update failure: Reconstruct Inbound.
-		// Remove the existing inbound first so im.Create() can bind the same port.
-		// im.Create() cannot atomically swap a TCP listener — it tries to start the
-		// new socket before the old one is closed, causing "address already in use".
-		// The brief listen gap (< 1 ms) is far less disruptive than a full restart.
-		_ = im.Remove(tag) // ignore error when tag doesn't exist yet
-		logger := nopFactory.NewLogger(fmt.Sprintf("inbound/%s[%s]", inb.Type, tag))
-		if err := im.Create(s.ctx, router, logger, tag, inb.Type, inb.Options); err != nil {
-			return fmt.Errorf("recreate inbound %s: %w", tag, err)
-		}
+	if err := s.applyInboundUsers(opts, im, router, nopFactory, configChanged); err != nil {
+		return err
 	}
 
 	// Trackers remain registered on the Router (which survives ReloadUsers).
@@ -286,6 +212,82 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 	s.nodeConfig = nodeConfig
 	s.tls = tls
 	return nil
+}
+
+// applyInboundUsers hot-swaps users in the running inbounds. Unless force is
+// set (kernel-affecting config changed), each inbound is first given a chance
+// to update its users in place via UpdatableInbound — zero connection
+// disruption; only on failure (or force) is the inbound recreated. The
+// existing inbound is removed before im.Create() so the same port can be
+// rebound: im.Create() cannot atomically swap a TCP listener, and the brief
+// listen gap (< 1 ms) beats a full restart.
+func (s *SingBox) applyInboundUsers(opts option.Options, im adapter.InboundManager, router adapter.Router, nopFactory singLog.Factory, force bool) error {
+	for _, inb := range opts.Inbounds {
+		tag := inb.Tag
+		if !force {
+			if existing, ok := im.Get(tag); ok && existing.Type() == inb.Type && tryUpdateInboundUsers(existing, inb) {
+				continue
+			}
+			nlog.Core().Debug("incremental update unavailable, recreating inbound", "tag", tag)
+		}
+
+		_ = im.Remove(tag) // ignore error when tag doesn't exist yet
+		logger := nopFactory.NewLogger(fmt.Sprintf("inbound/%s[%s]", inb.Type, tag))
+		if err := im.Create(s.ctx, router, logger, tag, inb.Type, inb.Options); err != nil {
+			return fmt.Errorf("recreate inbound %s: %w", tag, err)
+		}
+	}
+	return nil
+}
+
+// tryUpdateInboundUsers attempts the protocol-specific hot user update.
+// Reports whether the inbound was updated in place.
+func tryUpdateInboundUsers(existing adapter.Inbound, inb option.Inbound) bool {
+	var err error
+	switch v := existing.(type) {
+	case adapter.UpdatableInbound[option.VMessUser]:
+		if opts, ok := inb.Options.(*option.VMessInboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableInbound[option.VLESSUser]:
+		if opts, ok := inb.Options.(*option.VLESSInboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableInbound[option.TrojanUser]:
+		if opts, ok := inb.Options.(*option.TrojanInboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableInbound[option.Hysteria2User]:
+		if opts, ok := inb.Options.(*option.Hysteria2InboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableShadowsocksInbound:
+		if opts, ok := inb.Options.(*option.ShadowsocksInboundOptions); ok {
+			err = v.UpdateUsersByOptions(opts.Users)
+		}
+	case adapter.UpdatableInbound[option.TUICUser]:
+		if opts, ok := inb.Options.(*option.TUICInboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableInbound[option.AnyTLSUser]:
+		if opts, ok := inb.Options.(*option.AnyTLSInboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableInbound[option.MieruUser]:
+		if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
+			err = v.UpdateUsers(opts.Users)
+		}
+	case adapter.UpdatableInbound[auth.User]:
+		switch opts := inb.Options.(type) {
+		case *option.NaiveInboundOptions:
+			err = v.UpdateUsers(opts.Users)
+		case *option.SocksInboundOptions:
+			err = v.UpdateUsers(opts.Users)
+		case *option.HTTPMixedInboundOptions:
+			err = v.UpdateUsers(opts.Users)
+		}
+	}
+	return err == nil
 }
 
 // registerTracker wires the ConnTracker to the current Router exactly once.
@@ -517,66 +519,8 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 		return fmt.Errorf("router not available")
 	}
 
-	nopFactory := singLog.NewNOPFactory()
-
-	for _, inb := range opts.Inbounds {
-		tag := inb.Tag
-		if existing, ok := im.Get(tag); ok && existing.Type() == inb.Type {
-			var err error
-			switch v := existing.(type) {
-			case adapter.UpdatableInbound[option.VMessUser]:
-				if opts, ok := inb.Options.(*option.VMessInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.VLESSUser]:
-				if opts, ok := inb.Options.(*option.VLESSInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.TrojanUser]:
-				if opts, ok := inb.Options.(*option.TrojanInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.Hysteria2User]:
-				if opts, ok := inb.Options.(*option.Hysteria2InboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableShadowsocksInbound:
-				if opts, ok := inb.Options.(*option.ShadowsocksInboundOptions); ok {
-					err = v.UpdateUsersByOptions(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.TUICUser]:
-				if opts, ok := inb.Options.(*option.TUICInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.AnyTLSUser]:
-				if opts, ok := inb.Options.(*option.AnyTLSInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.MieruUser]:
-				if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[auth.User]:
-				switch opts := inb.Options.(type) {
-				case *option.NaiveInboundOptions:
-					err = v.UpdateUsers(opts.Users)
-				case *option.SocksInboundOptions:
-					err = v.UpdateUsers(opts.Users)
-				case *option.HTTPMixedInboundOptions:
-					err = v.UpdateUsers(opts.Users)
-				}
-			}
-			if err == nil {
-				continue
-			}
-			nlog.Core().Warn("incremental update failed, recreating inbound", "tag", tag, "error", err)
-		}
-
-		_ = im.Remove(tag)
-		logger := nopFactory.NewLogger(fmt.Sprintf("inbound/%s[%s]", inb.Type, tag))
-		if err := im.Create(s.ctx, router, logger, tag, inb.Type, inb.Options); err != nil {
-			return fmt.Errorf("recreate inbound %s: %w", tag, err)
-		}
+	if err := s.applyInboundUsers(opts, im, router, singLog.NewNOPFactory(), false); err != nil {
+		return err
 	}
 
 	if s.connTracker != nil {
@@ -595,28 +539,6 @@ func (s *SingBox) GetUserTraffic(_ context.Context) (traffic map[int][2]int64, a
 	}
 	traffic, aliveIPs, connCount = ct.GetUserTraffic()
 	return traffic, aliveIPs, connCount, nil
-}
-
-// CloseConnection force-closes a specific connection by its ID.
-func (s *SingBox) CloseConnection(_ context.Context, connID string) error {
-	ct := s.connTrackerSafe()
-	if ct == nil {
-		return fmt.Errorf("not running")
-	}
-	if !ct.CloseByID(connID) {
-		nlog.Core().Debug("CloseConnection: connection not found (already closed?)", "id", connID)
-	}
-	return nil
-}
-
-// CloseUserConnections terminates all connections for a user UUID.
-func (s *SingBox) CloseUserConnections(_ context.Context, uuid string) error {
-	ct := s.connTrackerSafe()
-	if ct == nil {
-		return nil
-	}
-	ct.CloseByUUID(uuid)
-	return nil
 }
 
 // buildUserMap creates a UUID→userID mapping used by ConnTracker to attribute

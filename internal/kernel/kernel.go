@@ -11,15 +11,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type Capabilities struct {
-	PerUserSpeedLimit    bool
-	DeviceLimit          bool
-	BuiltInTrafficStats  bool
-	AliveIPTracking      bool
-	ForceCloseConnection bool
-	ForceCloseUser       bool
-}
-
 // TLSCert holds PEM-encoded TLS certificate material.
 // All cert modes (self-signed, file, ACME, panel-content) normalise to PEM
 // so kernels never need to deal with file paths.
@@ -47,8 +38,6 @@ type Kernel interface {
 	Name() string
 	// Protocols returns the protocol names this kernel supports.
 	Protocols() []string
-	// Capabilities returns the explicit runtime semantics supported by the kernel.
-	Capabilities() Capabilities
 
 	// ─── Lifecycle ──────────────────────────────────────────────────────
 	// Start initialises the kernel with the given node config and initial
@@ -86,10 +75,6 @@ type Kernel interface {
 	// traffic maps userID → [upload, download] cumulative bytes.
 	// connCount is the total number of active connections (for metrics).
 	GetUserTraffic(ctx context.Context) (traffic map[int][2]int64, aliveIPs map[int]map[string]bool, connCount int, err error)
-	// CloseConnection terminates a specific connection by ID.
-	CloseConnection(ctx context.Context, connID string) error
-	// CloseUserConnections terminates all connections for the given user UUID.
-	CloseUserConnections(ctx context.Context, uuid string) error
 	// SetSpeedLimitFunc configures per-user bandwidth throttling.
 	// The function resolves a user UUID to a *rate.Limiter (nil = unlimited).
 	SetSpeedLimitFunc(fn func(uuid string) *rate.Limiter)

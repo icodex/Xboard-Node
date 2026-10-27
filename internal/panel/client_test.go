@@ -152,94 +152,6 @@ func TestGetUsers_NotModified(t *testing.T) {
 	}
 }
 
-func TestPushTraffic_Success(t *testing.T) {
-	var received map[string]interface{}
-	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/api/v1/server/UniProxy/push" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&received)
-		w.WriteHeader(http.StatusOK)
-	})
-	defer ts.Close()
-
-	data := map[int][2]int64{
-		1: {1024, 2048},
-		2: {512, 256},
-	}
-	if err := client.PushTraffic(data); err != nil {
-		t.Fatalf("PushTraffic: %v", err)
-	}
-	if received == nil {
-		t.Fatal("server received nil payload")
-	}
-	// Verify token was injected
-	if received["token"] != "test-token" {
-		t.Errorf("token: got %v", received["token"])
-	}
-}
-
-func TestPushTraffic_Empty(t *testing.T) {
-	called := false
-	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-	defer ts.Close()
-
-	if err := client.PushTraffic(nil); err != nil {
-		t.Fatalf("PushTraffic nil: %v", err)
-	}
-	if called {
-		t.Error("should not call server for empty traffic")
-	}
-}
-
-func TestPushAlive_Success(t *testing.T) {
-	var received map[string]interface{}
-	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/server/UniProxy/alive" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&received)
-		w.WriteHeader(http.StatusOK)
-	})
-	defer ts.Close()
-
-	data := map[int][]string{
-		1: {"1.2.3.4", "5.6.7.8"},
-	}
-	if err := client.PushAlive(data); err != nil {
-		t.Fatalf("PushAlive: %v", err)
-	}
-	if received == nil {
-		t.Fatal("server received nil")
-	}
-}
-
-func TestPushStatus_Success(t *testing.T) {
-	var received map[string]interface{}
-	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/server/UniProxy/status" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&received)
-		w.WriteHeader(http.StatusOK)
-	})
-	defer ts.Close()
-
-	err := client.PushStatus(50.0, [2]uint64{8192, 4096}, [2]uint64{2048, 1024}, [2]uint64{100000, 50000})
-	if err != nil {
-		t.Fatalf("PushStatus: %v", err)
-	}
-	if received["cpu"].(float64) != 50.0 {
-		t.Errorf("cpu: got %v", received["cpu"])
-	}
-}
-
 func TestResetETags(t *testing.T) {
 	callCount := 0
 	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
@@ -260,20 +172,6 @@ func TestResetETags(t *testing.T) {
 	client.GetConfig()
 	client.ResetETags()
 	client.GetConfig()
-}
-
-func TestPushTraffic_ServerError(t *testing.T) {
-	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("unavailable"))
-	})
-	defer ts.Close()
-
-	data := map[int][2]int64{1: {100, 200}}
-	err := client.PushTraffic(data)
-	if err == nil {
-		t.Fatal("expected error for 503")
-	}
 }
 
 func TestClient_NodeTypeInQuery(t *testing.T) {

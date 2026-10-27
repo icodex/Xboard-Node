@@ -191,7 +191,7 @@ func (d *LimitDispatcher) Close() error {
 
 // ─── Limit management (called by Xray kernel) ──────────────────────────────
 
-func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits, _ map[string]int) {
+func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits map[string]int) {
 	d.mu.Lock()
 	d.emailToUID = emailToUID
 	d.deviceLimits = deviceLimits
