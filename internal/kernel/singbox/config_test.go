@@ -948,3 +948,19 @@ func TestApplyTransport_WS_HostOverridesHeader(t *testing.T) {
 		t.Errorf("panel header lost: %v", headers)
 	}
 }
+
+func TestBuildInbound_Shadowsocks2022ChachaRejected(t *testing.T) {
+	// sing-shadowsocks server iPSK is aes-only: chacha20-poly1305 multi-user
+	// inbound creation fails with "invalid argument", so the builder returns
+	// nil and the kernel refuses to start.
+	nc := &panel.NodeConfig{
+		Protocol:   "shadowsocks",
+		ServerPort: 8389,
+		Cipher:     "2022-blake3-chacha20-poly1305",
+		ServerKey:  "base64serverkey==",
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if inbound != nil {
+		t.Fatalf("chacha20-poly1305 multi-user inbound must be rejected, got %+v", inbound)
+	}
+}

@@ -500,6 +500,16 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	base["method"] = nc.Cipher
 
 	ss2022, isSS2022 := ss2022Methods[nc.Cipher]
+
+	// sing-shadowsocks server-side iPSK (the users[] form built below) only
+	// implements the blake3-aes methods; the chacha20 variant fails inbound
+	// creation with "invalid argument". Return nil so the kernel refuses to
+	// start with the existing no-inbound guard.
+	if isSS2022 && nc.Cipher == "2022-blake3-chacha20-poly1305" {
+		nlog.Core().Error("ss2022 chacha20-poly1305 does not support multi-user on sing-box (server iPSK is aes-only); use 2022-blake3-aes-256-gcm instead")
+		return nil
+	}
+
 	if isSS2022 {
 		base["password"] = nc.ServerKey
 	}

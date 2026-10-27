@@ -776,3 +776,18 @@ func TestBuildTrojan_DoesNotMutateSpec(t *testing.T) {
 		t.Errorf("buildTrojan mutated shared NodeSpec.TLS: got %d, want %d", nc.TLS, before)
 	}
 }
+
+func TestBuildConfig_Shadowsocks2022ChachaRejected(t *testing.T) {
+	// chacha20-poly1305 multi-user SS2022 is unsupported in Xray (aes-only):
+	// the builder must return nil so the kernel refuses to start.
+	nc := panel.NodeConfig{
+		Protocol:   "shadowsocks",
+		ServerPort: 8388,
+		Cipher:     "2022-blake3-chacha20-poly1305",
+		ServerKey:  "server-key",
+	}
+	inbound := buildInbound(testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if inbound != nil {
+		t.Fatalf("chacha20-poly1305 multi-user inbound must be rejected, got %+v", inbound)
+	}
+}

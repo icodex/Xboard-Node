@@ -321,6 +321,14 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 
 	clients := make([]M, 0, len(users))
 
+	// Xray multi-user SS2022 only parses blake3-aes methods; the chacha20
+	// variant would fail config load. Return nil so the kernel refuses to
+	// start with the existing no-inbound guard.
+	if isSS2022 && nc.Cipher == "2022-blake3-chacha20-poly1305" {
+		nlog.Core().Error("ss2022 chacha20-poly1305 does not support multi-user in Xray; use 2022-blake3-aes-256-gcm instead")
+		return nil
+	}
+
 	if isSS2022 {
 		// SS2022: server key at top level, per-user key must be Base64 of fixed-length raw bytes.
 		// Only blake3-aes-* supports multi-user in Xray; chacha20 variant is single-user only.
