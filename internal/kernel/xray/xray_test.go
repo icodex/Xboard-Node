@@ -117,6 +117,37 @@ func TestXrayGetUserTrafficUsesBuiltInStatsAndDispatcherState(t *testing.T) {
 	}
 }
 
+// A removed user's residual counter bytes must be reported exactly once.
+func TestXrayRemovedUserResidualReportedOnce(t *testing.T) {
+	users := []model.UserSpec{{ID: 5, UUID: "uuid-5"}, {ID: 6, UUID: "uuid-6"}}
+	x, mgr := newStatsBackedXray(t, users, nil)
+	up := mustRegisterCounter(t, mgr, counterName(5, "uplink"))
+	down := mustRegisterCounter(t, mgr, counterName(5, "downlink"))
+	up.Add(10)
+	down.Add(20)
+
+	x.mu.Lock()
+	x.drainRemovedStats(users[:1])
+	x.users = users[1:]
+	x.mu.Unlock()
+
+	traffic, _, _, err := x.GetUserTraffic(context.Background())
+	if err != nil {
+		t.Fatalf("GetUserTraffic() error = %v", err)
+	}
+	if got := traffic[5]; got != [2]int64{10, 20} {
+		t.Fatalf("residual traffic[5] = %v, want [10 20]", got)
+	}
+
+	traffic, _, _, err = x.GetUserTraffic(context.Background())
+	if err != nil {
+		t.Fatalf("second GetUserTraffic() error = %v", err)
+	}
+	if _, still := traffic[5]; still {
+		t.Fatalf("residual must be reported once, got %v", traffic[5])
+	}
+}
+
 func TestXrayUpdateDispatcherLimitsPropagatesDeviceMetadata(t *testing.T) {
 	x := New(config.KernelConfig{Type: "xray"})
 	ld := newTestDispatcher()

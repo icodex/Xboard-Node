@@ -58,14 +58,13 @@ func main() {
 func runWithReload(initialRoot *config.RootConfig, configPath string) {
 	var healthSrv *http.Server
 	var healthPort int
-	startHealth := func(port int) {
+	startHealth := func(port int) error {
 		if port <= 0 {
-			return
+			return nil
 		}
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 		if err != nil {
-			nlog.Core().Error("failed to start health check listener", "port", port, "error", err)
-			os.Exit(1)
+			return fmt.Errorf("listen :%d: %w", port, err)
 		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -73,14 +72,16 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"status":"ok"}`))
 		})
-		healthSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		healthSrv = srv
 		healthPort = port
 		go func() {
 			nlog.Core().Debug(fmt.Sprintf("health check listening on :%d", port))
-			if err := healthSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				nlog.Core().Warn("health check server stopped", "error", err)
 			}
 		}()
+		return nil
 	}
 
 	initialInstances, err := initialRoot.NormalizeInstances()
@@ -88,7 +89,10 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		nlog.Core().Error("failed to normalize initial config", "error", err)
 		os.Exit(1)
 	}
-	startHealth(initialInstances[0].HealthPort)
+	if err := startHealth(initialInstances[0].HealthPort); err != nil {
+		nlog.Core().Error("failed to start health check listener", "error", err)
+		os.Exit(1)
+	}
 	defer func() {
 		if healthSrv != nil {
 			healthSrv.Close()
@@ -142,11 +146,15 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		}
 
 		if instances[0].HealthPort != healthPort {
-			if healthSrv != nil {
-				healthSrv.Close()
-				healthSrv = nil
+			// Bind the new port before closing the old server: a failed bind
+			// (port busy) keeps the previous health endpoint alive instead of
+			// killing the daemon mid-reload.
+			oldSrv := healthSrv
+			if err := startHealth(instances[0].HealthPort); err != nil {
+				nlog.Core().Warn("failed to start health check on new port, keeping previous", "port", instances[0].HealthPort, "error", err)
+			} else if oldSrv != nil {
+				oldSrv.Close()
 			}
-			startHealth(instances[0].HealthPort)
 		}
 
 		errCh := make(chan error, len(instances))

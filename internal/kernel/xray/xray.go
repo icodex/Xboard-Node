@@ -392,6 +392,9 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 		return 0, nil
 	}
 
+	// Capture the removed users' residual counters before their accounts go.
+	x.drainRemovedStats(users)
+
 	if len(kept) == 0 {
 		x.mu.Unlock()
 		x.Stop()
@@ -455,7 +458,8 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 
 	um, umErr := x.getUserManager()
 	if umErr != nil {
-		// Protocol doesn't support UserManager → full restart
+		// Protocol doesn't support UserManager → full restart. The residual
+		// counters die with the old instance; nothing to drain.
 		nc, t := x.nodeConfig, x.tls
 		x.mu.Unlock()
 		nlog.Core().Debug("xray: UpdateUsers fallback to restart", "reason", umErr)
@@ -463,6 +467,10 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 			return 0, 0, err
 		}
 		return
+	}
+
+	if len(toRemove) > 0 {
+		x.drainRemovedStats(toRemove)
 	}
 
 	proto := x.protocol
@@ -736,16 +744,7 @@ func (x *Xray) aggregateStats() (map[int][2]int64, error) {
 
 	traffic := make(map[int][2]int64)
 	for _, u := range x.users {
-		email := userEmail(u.ID)
-
-		var dUp, dDown int64
-		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>uplink", email)); c != nil {
-			dUp = c.Set(0)
-		}
-		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>downlink", email)); c != nil {
-			dDown = c.Set(0)
-		}
-
+		dUp, dDown := readCounterDelta(mgr, userEmail(u.ID))
 		if dUp > 0 || dDown > 0 {
 			cum := x.cumTraffic[u.ID]
 			cum[0] += dUp
@@ -757,7 +756,55 @@ func (x *Xray) aggregateStats() (map[int][2]int64, error) {
 			traffic[u.ID] = cum
 		}
 	}
+
+	// One-shot: report residual traffic of already-removed users, then drop
+	// the entry so it is not re-reported on every tick.
+	for uid, cum := range x.cumTraffic {
+		if _, ok := traffic[uid]; ok {
+			continue
+		}
+		if cum[0] > 0 || cum[1] > 0 {
+			traffic[uid] = cum
+		}
+		delete(x.cumTraffic, uid)
+	}
 	return traffic, nil
+}
+
+// readCounterDelta drains xray's per-user uplink/downlink counters, returning
+// the bytes accumulated since the last read.
+func readCounterDelta(mgr stats.Manager, email string) (up, down int64) {
+	if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>uplink", email)); c != nil {
+		up = c.Set(0)
+	}
+	if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>downlink", email)); c != nil {
+		down = c.Set(0)
+	}
+	return
+}
+
+// drainRemovedStats folds the residual counters of users about to be removed
+// into cumTraffic, so their last partial-tick bytes are reported once by
+// aggregateStats instead of vanishing with the removed account.
+// Must be called with x.mu held and a running instance.
+func (x *Xray) drainRemovedStats(removed []model.UserSpec) {
+	sm := x.instance.GetFeature(stats.ManagerType())
+	if sm == nil {
+		return
+	}
+	mgr, ok := sm.(stats.Manager)
+	if !ok {
+		return
+	}
+	for _, u := range removed {
+		dUp, dDown := readCounterDelta(mgr, userEmail(u.ID))
+		if dUp > 0 || dDown > 0 {
+			cum := x.cumTraffic[u.ID]
+			cum[0] += dUp
+			cum[1] += dDown
+			x.cumTraffic[u.ID] = cum
+		}
+	}
 }
 
 // updateBandwidthLimits configures the patched xray-core bandwidth feature

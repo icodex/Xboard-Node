@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -50,6 +51,9 @@ type Orchestrator struct {
 	// runCtx is stored from Run() so that onWSEvent can trigger rediscover
 	// for sync.nodes events without blocking the main loop.
 	runCtx context.Context
+
+	// rediscovering single-flights rediscover runs (ticker + sync.nodes).
+	rediscovering atomic.Bool
 
 	pullInterval time.Duration
 	pushInterval time.Duration
@@ -105,6 +109,10 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 		case <-discoveryTicker.C:
 			o.rediscover(ctx)
+			// Re-check WS enablement: the panel may turn WS on after boot.
+			if o.ws == nil {
+				o.tryStartWS(ctx)
+			}
 
 		case <-statusTicker.C:
 			o.reportMachineStatus()
@@ -131,49 +139,52 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	o.mailboxes[mn.ID] = mb
 	o.eventsMu.Unlock()
 
-	nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
-
-	perNodeClient := o.client.ForNode(mn.ID)
-
-	// Pre-fetch node config to detect transport-based kernel requirements.
-	// If the transport (e.g. xhttp) is incompatible with the configured kernel
-	// (e.g. singbox), auto-switch to the required kernel for this node.
-	if cfgSnapshot, err := perNodeClient.GetConfig(); err == nil && cfgSnapshot != nil {
-		if resolved := model.ResolveKernelForTransport(cfgSnapshot.Network, nodeCfg.Kernel.Type); resolved != nodeCfg.Kernel.Type {
-			nlog.Core().Info(fmt.Sprintf("machine: auto-switching kernel for node %d (%s→%s, transport=%s)",
-				mn.ID, nodeCfg.Kernel.Type, resolved, cfgSnapshot.Network))
-			nodeCfg.Kernel.Type = resolved
-		}
-	}
-	// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
-	perNodeClient.ResetConfigETag()
-
-	var push controlplane.PushClient
-	if o.ws != nil {
-		push = &machineNodePush{
-			nodeID: mn.ID,
-			ws:     o.ws,
-		}
-	}
-
-	// The registerFn is called by MachinePanelControlPlane.Initial() to expose
-	// the node mailbox + status channel to the Service.
-	nodeID := mn.ID
-	registerFn := func(st chan<- controlplane.StatusChange) *controlplane.NodeMailbox {
-		o.registerNode(nodeID, st)
-		return mb
-	}
-
-	cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
-	svc := service.NewWithControlPlane(nodeCfg, cp)
-
 	nlog.Core().Info(fmt.Sprintf("machine: starting node %d (%s/%s)",
 		mn.ID, mn.Type, mn.Name))
 
 	go func() {
 		defer close(done)
 		defer o.unregisterNode(mn.ID)
-		if err := svc.Run(nodeCtx); err != nil {
+
+		nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
+
+		perNodeClient := o.client.ForNode(mn.ID)
+
+		// Pre-fetch node config to detect transport-based kernel requirements.
+		// If the transport (e.g. xhttp) is incompatible with the configured kernel
+		// (e.g. singbox), auto-switch to the required kernel for this node.
+		if cfgSnapshot, err := perNodeClient.GetConfig(); err == nil && cfgSnapshot != nil {
+			if resolved := model.ResolveKernelForTransport(cfgSnapshot.Network, nodeCfg.Kernel.Type); resolved != nodeCfg.Kernel.Type {
+				nlog.Core().Info(fmt.Sprintf("machine: auto-switching kernel for node %d (%s→%s, transport=%s)",
+					mn.ID, nodeCfg.Kernel.Type, resolved, cfgSnapshot.Network))
+				nodeCfg.Kernel.Type = resolved
+			}
+		}
+		// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
+		perNodeClient.ResetConfigETag()
+
+		o.mu.Lock()
+		ws := o.ws
+		o.mu.Unlock()
+		var push controlplane.PushClient
+		if ws != nil {
+			push = &machineNodePush{
+				nodeID: mn.ID,
+				ws:     ws,
+			}
+		}
+
+		// The registerFn is called by MachinePanelControlPlane.Initial() to expose
+		// the node mailbox + status channel to the Service.
+		nodeID := mn.ID
+		registerFn := func(st chan<- controlplane.StatusChange) *controlplane.NodeMailbox {
+			o.registerNode(nodeID, st)
+			return mb
+		}
+
+		cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
+		svc := service.NewWithControlPlane(nodeCfg, cp)
+		if err := svc.Run(nodeCtx); err != nil && nodeCtx.Err() == nil {
 			nlog.Core().Error("machine node exited with error",
 				"node_id", mn.ID, "error", err)
 		}
@@ -223,6 +234,13 @@ func (o *Orchestrator) stopAll() {
 // ─── Node discovery ──────────────────────────────────────────────────────
 
 func (o *Orchestrator) rediscover(ctx context.Context) {
+	// Single-flight: sync.nodes events can spawn rediscover runs on top of
+	// the ticker; an overlapping run is skipped, the next tick catches up.
+	if !o.rediscovering.CompareAndSwap(false, true) {
+		return
+	}
+	defer o.rediscovering.Store(false)
+
 	nodesResp, err := o.client.GetMachineNodes()
 	if err != nil {
 		nlog.Core().Warn("machine node discovery failed", "error", err)
@@ -272,11 +290,12 @@ func (o *Orchestrator) reportMachineStatus() {
 func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	hs, err := o.client.Handshake()
 	if err != nil {
-		nlog.Core().Warn("machine ws handshake failed, REST only", "error", err)
+		// Debug: re-checked on every discovery tick, so failures would spam.
+		nlog.Core().Debug("machine ws handshake failed, REST only", "error", err)
 		return
 	}
 	if !hs.WebSocket.Enabled || hs.WebSocket.WSURL == "" {
-		nlog.Core().Info("machine: ws disabled by panel, REST only")
+		nlog.Core().Debug("machine: ws disabled by panel, REST only")
 		return
 	}
 
