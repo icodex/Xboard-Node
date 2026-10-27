@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -232,5 +233,121 @@ func TestACMEFingerprintEnvOrderStable(t *testing.T) {
 	}
 	if acmeFingerprint(a) != acmeFingerprint(b) {
 		t.Fatal("fingerprint not order-independent")
+	}
+}
+
+func TestPersistPEM_WritesFullchainAndPrivkey(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateSelfSignedPair(t, "example.test")
+
+	m := NewManager(config.CertConfig{CertDir: dir})
+	m.storePEM(certPEM, keyPEM)
+
+	fullchainPath := filepath.Join(dir, "fullchain.pem")
+	privkeyPath := filepath.Join(dir, "privkey.pem")
+
+	readCert, err := os.ReadFile(fullchainPath)
+	if err != nil {
+		t.Fatalf("expected fullchain.pem to exist: %v", err)
+	}
+	if string(readCert) != string(certPEM) {
+		t.Errorf("cert content mismatch")
+	}
+
+	readKey, err := os.ReadFile(privkeyPath)
+	if err != nil {
+		t.Fatalf("expected privkey.pem to exist: %v", err)
+	}
+	if string(readKey) != string(keyPEM) {
+		t.Errorf("key content mismatch")
+	}
+}
+
+func TestLoadPersistedPEM_FullchainAndPrivkey(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateSelfSignedPair(t, "example.test")
+
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(config.CertConfig{CertDir: dir})
+	if !m.loadPersistedPEM() {
+		t.Fatal("expected loadPersistedPEM to return true for fullchain.pem and privkey.pem")
+	}
+	if !m.HasCert() {
+		t.Fatal("expected manager to have cert after loadPersistedPEM")
+	}
+	got := m.TLSCert()
+	if string(got.CertPEM) != string(certPEM) || string(got.KeyPEM) != string(keyPEM) {
+		t.Errorf("loaded cert mismatch")
+	}
+}
+
+func TestLoadPersistedPEM_LegacyFallback(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateSelfSignedPair(t, "example.test")
+
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "key.pem"), keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(config.CertConfig{CertDir: dir})
+	if !m.loadPersistedPEM() {
+		t.Fatal("expected loadPersistedPEM to return true for legacy cert.pem and key.pem")
+	}
+	if !m.HasCert() {
+		t.Fatal("expected manager to have cert after loadPersistedPEM")
+	}
+	got := m.TLSCert()
+	if string(got.CertPEM) != string(certPEM) || string(got.KeyPEM) != string(keyPEM) {
+		t.Errorf("loaded cert mismatch")
+	}
+}
+
+func TestPersistPEM_ReadOnlyNoopWhenContentMatches(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateSelfSignedPair(t, "example.test")
+
+	fullchainPath := filepath.Join(dir, "fullchain.pem")
+	privkeyPath := filepath.Join(dir, "privkey.pem")
+	if err := os.WriteFile(fullchainPath, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privkeyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make directory read-only so atomicWriteFile (.tmp creation) would fail
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+
+	m := NewManager(config.CertConfig{CertDir: dir})
+	// Should not log error or panic because content is already equal on disk
+	m.persistPEM(certPEM, keyPEM)
+}
+
+func TestResolveModeFor_CertDirWithDefaultFiles(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateSelfSignedPair(t, "example.test")
+
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := resolveModeFor(config.CertConfig{CertDir: dir})
+	if mode != "file" {
+		t.Errorf("expected mode file, got %q", mode)
 	}
 }

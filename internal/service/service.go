@@ -1202,7 +1202,8 @@ func hasUsableTLSConfig(spec *model.NodeSpec, tls kernel.TLSCert) bool {
 	case "content":
 		return strings.TrimSpace(spec.CertConfig.CertContent) != "" && strings.TrimSpace(spec.CertConfig.KeyContent) != ""
 	case "file":
-		return strings.TrimSpace(spec.CertConfig.CertFile) != "" && strings.TrimSpace(spec.CertConfig.KeyFile) != ""
+		return (strings.TrimSpace(spec.CertConfig.CertFile) != "" && strings.TrimSpace(spec.CertConfig.KeyFile) != "") ||
+			strings.TrimSpace(spec.CertConfig.CertDir) != ""
 	case "http":
 		return strings.TrimSpace(spec.CertConfig.Domain) != ""
 	case "dns":

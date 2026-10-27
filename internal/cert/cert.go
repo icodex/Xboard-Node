@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -79,6 +81,13 @@ func (m *Manager) storePEM(cert, key []byte) {
 	m.persistPEM(cert, key)
 }
 
+const (
+	defaultCertFile = "fullchain.pem"
+	defaultKeyFile  = "privkey.pem"
+	legacyCertFile  = "cert.pem"
+	legacyKeyFile   = "key.pem"
+)
+
 // persistPEM writes cert/key to cert_dir for restart recovery.
 // Errors are logged but not returned — persistence is best-effort.
 func (m *Manager) persistPEM(cert, key []byte) {
@@ -86,16 +95,20 @@ func (m *Manager) persistPEM(cert, key []byte) {
 	if dir == "" {
 		return
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
 		nlog.Core().Warn("cert: failed to create cert_dir", "dir", dir, "error", err)
 		return
 	}
-	certPath := filepath.Join(dir, "cert.pem")
-	keyPath := filepath.Join(dir, "key.pem")
-	if err := atomicWriteFile(certPath, cert, 0o644); err != nil {
+	certPath := filepath.Join(dir, defaultCertFile)
+	keyPath := filepath.Join(dir, defaultKeyFile)
+	if existing, err := os.ReadFile(certPath); err == nil && bytes.Equal(existing, cert) {
+		// Already up to date on disk (common when mounted read-only)
+	} else if err := atomicWriteFile(certPath, cert, 0o644); err != nil {
 		nlog.Core().Warn("cert: failed to persist cert", "path", certPath, "error", err)
 	}
-	if err := atomicWriteFile(keyPath, key, 0o600); err != nil {
+	if existing, err := os.ReadFile(keyPath); err == nil && bytes.Equal(existing, key) {
+		// Already up to date on disk (common when mounted read-only)
+	} else if err := atomicWriteFile(keyPath, key, 0o600); err != nil {
 		nlog.Core().Warn("cert: failed to persist key", "path", keyPath, "error", err)
 	}
 }
@@ -116,13 +129,19 @@ func (m *Manager) loadPersistedPEM() bool {
 	if dir == "" {
 		return false
 	}
-	certPEM, err := os.ReadFile(filepath.Join(dir, "cert.pem"))
+	certPEM, err := os.ReadFile(filepath.Join(dir, defaultCertFile))
 	if err != nil {
-		return false
+		certPEM, err = os.ReadFile(filepath.Join(dir, legacyCertFile))
+		if err != nil {
+			return false
+		}
 	}
-	keyPEM, err := os.ReadFile(filepath.Join(dir, "key.pem"))
+	keyPEM, err := os.ReadFile(filepath.Join(dir, defaultKeyFile))
 	if err != nil {
-		return false
+		keyPEM, err = os.ReadFile(filepath.Join(dir, legacyKeyFile))
+		if err != nil {
+			return false
+		}
 	}
 	if err := validateKeyPair(certPEM, keyPEM); err != nil {
 		nlog.Core().Warn("cert: persisted cert invalid, will regenerate", "error", err)
@@ -218,7 +237,21 @@ func resolveModeFor(cfg config.CertConfig) string {
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
 		return "file"
 	}
+	if cfg.CertDir != "" && hasDefaultPair(cfg.CertDir) {
+		return "file"
+	}
 	return "none"
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+func hasDefaultPair(dir string) bool {
+	hasCert := fileExists(filepath.Join(dir, defaultCertFile)) || fileExists(filepath.Join(dir, legacyCertFile))
+	hasKey := fileExists(filepath.Join(dir, defaultKeyFile)) || fileExists(filepath.Join(dir, legacyKeyFile))
+	return hasCert && hasKey
 }
 
 // resolveMode returns the effective cert mode, handling backward compat for auto_tls.
@@ -237,6 +270,9 @@ func (m *Manager) resolveMode() string {
 	}
 	// If cert/key file paths are provided → "file"
 	if m.cfg.CertFile != "" && m.cfg.KeyFile != "" {
+		return "file"
+	}
+	if m.cfg.CertDir != "" && hasDefaultPair(m.cfg.CertDir) {
 		return "file"
 	}
 	return "none"
@@ -295,11 +331,25 @@ func (m *Manager) Stop() {}
 // ─── Mode: file ────────────────────────────────────────────────────────────
 
 func (m *Manager) startFile() error {
-	certPEM, err := os.ReadFile(m.cfg.CertFile)
+	certFile := m.cfg.CertFile
+	if certFile == "" && m.cfg.CertDir != "" {
+		certFile = filepath.Join(m.cfg.CertDir, defaultCertFile)
+		if !fileExists(certFile) {
+			certFile = filepath.Join(m.cfg.CertDir, legacyCertFile)
+		}
+	}
+	keyFile := m.cfg.KeyFile
+	if keyFile == "" && m.cfg.CertDir != "" {
+		keyFile = filepath.Join(m.cfg.CertDir, defaultKeyFile)
+		if !fileExists(keyFile) {
+			keyFile = filepath.Join(m.cfg.CertDir, legacyKeyFile)
+		}
+	}
+	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
 		return fmt.Errorf("cert file: %w", err)
 	}
-	keyPEM, err := os.ReadFile(m.cfg.KeyFile)
+	keyPEM, err := os.ReadFile(keyFile)
 	if err != nil {
 		return fmt.Errorf("key file: %w", err)
 	}
@@ -307,7 +357,7 @@ func (m *Manager) startFile() error {
 		return fmt.Errorf("invalid certificate pair: %w", err)
 	}
 	m.storePEM(certPEM, keyPEM)
-	nlog.Core().Debug("TLS certificate loaded from files", "cert", m.cfg.CertFile, "key", m.cfg.KeyFile)
+	nlog.Core().Debug("TLS certificate loaded from files", "cert", certFile, "key", keyFile)
 	return nil
 }
 
