@@ -163,17 +163,32 @@ func (t *ConnTracker) SetDeviceLimitFunc(fn func(uuid string) (int, bool)) {
 }
 
 // SetUserMap replaces the UUID→userID mapping and ensures per-user stats
-// structs exist for all users. Old users that are no longer present keep
-// their stats until their connections drain.
+// structs exist for all users. Stats of removed users with no live
+// connections are dropped, so the map does not grow unbounded over the
+// node's lifetime; removed users still holding connections keep their
+// stats until those connections drain.
 func (t *ConnTracker) SetUserMap(m map[string]int) {
 	t.usersMu.Lock()
+	defer t.usersMu.Unlock()
 	t.uuidMap = m
+	keep := make(map[int]struct{}, len(m))
 	for _, uid := range m {
+		keep[uid] = struct{}{}
 		if _, ok := t.users[uid]; !ok {
 			t.users[uid] = &userStats{ips: make(map[string]int)}
 		}
 	}
-	t.usersMu.Unlock()
+	for uid, us := range t.users {
+		if _, ok := keep[uid]; ok {
+			continue
+		}
+		us.mu.Lock()
+		idle := us.connCount == 0
+		us.mu.Unlock()
+		if idle {
+			delete(t.users, uid)
+		}
+	}
 }
 
 // UpdateGlobalDevices syncs global device state from panel.

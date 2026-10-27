@@ -180,6 +180,34 @@ func TestConnTrackerCloseByIDClosesTrackedConnection(t *testing.T) {
 	}
 }
 
+// SetUserMap must drop stats of removed users once their connections drain,
+// otherwise the users map grows without bound over the node's lifetime.
+func TestConnTrackerSetUserMapPrunesRemovedIdleUsers(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMap(map[string]int{"uuid-1": 1})
+
+	// Live connection keeps the removed user's stats alive.
+	wrapped := tracker.RoutedConnection(context.Background(), &testConn{}, testInboundContext("uuid-1", "1.1.1.1"), nil, nil)
+	tracker.SetUserMap(map[string]int{"uuid-2": 2})
+	if _, aliveIPs, _ := tracker.GetUserTraffic(); aliveIPs[1] == nil {
+		t.Fatal("user with live connection must keep stats")
+	}
+
+	wrapped.Close()
+	tracker.SetUserMap(map[string]int{"uuid-2": 2})
+
+	tracker.usersMu.RLock()
+	_, hasOld := tracker.users[1]
+	_, hasNew := tracker.users[2]
+	tracker.usersMu.RUnlock()
+	if hasOld {
+		t.Fatal("drained removed user must be pruned")
+	}
+	if !hasNew {
+		t.Fatal("current user must keep stats entry")
+	}
+}
+
 func TestConnTrackerRateLimitHonorsContextCancellation(t *testing.T) {
 	tracker := NewConnTracker(0)
 	tracker.SetUserMap(map[string]int{"uuid-1": 1})
