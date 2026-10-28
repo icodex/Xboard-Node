@@ -64,16 +64,18 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	// Merge panel routes and static config routes
 	cfg["route"] = buildRoutes(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
 
-	// Automatically enable rule_set caching (cache_file) when panel routes
-	// reference geoip:/geosite: entries so that the downloaded .srs rule_set
-	// files survive across process restarts.
-	if kernel.NeedsGeoIP(nc.Routes) || kernel.NeedsGeoSite(nc.Routes) || kernel.NeedsGeoIPRules(nc.CustomRouteRules) || kernel.NeedsGeoSiteRules(nc.CustomRouteRules) {
-		cfg["experimental"] = M{
-			"cache_file": M{
-				"enabled": true,
-				"path":    filepath.Join(kcfg.ConfigDir, "cache.db"),
-			},
-		}
+	// cache_file is ALWAYS pinned to a per-instance path: the nlogBridge is
+	// passed as PlatformLogWriter, which makes sing-box create a cache-file
+	// service even without any experimental config — with a cwd-relative
+	// cache.db that every sing-box instance in the process would share and
+	// lock-conflict on (second instance dies with "initialize cache-file:
+	// timeout"). Geoip/geosite .srs caching (the original trigger) rides the
+	// same store.
+	cfg["experimental"] = M{
+		"cache_file": M{
+			"enabled": true,
+			"path":    filepath.Join(kcfg.ConfigDir, "cache.db"),
+		},
 	}
 
 	mergeCustomSingbox(cfg, kcfg)

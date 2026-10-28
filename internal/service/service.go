@@ -645,6 +645,13 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if s.nodeLog != nil {
 			s.nodeLog.Info(fmt.Sprintf("users updated, %d users", len(event.Users)))
 		}
+		// Pure-WS bootstrap: when the handshake returns no REST snapshot
+		// (WS enabled), lastUsers is only ever seeded by REST pulls, which are
+		// skipped while the WS is connected - the kernel could never start.
+		// Seed the desired state before the running check.
+		if !s.kernel.IsRunning() {
+			s.updateUserState(event.Users)
+		}
 		s.applyUserUpdate(ctx, event.Users, newHash)
 
 	case controlplane.EventSyncUserDelta:
