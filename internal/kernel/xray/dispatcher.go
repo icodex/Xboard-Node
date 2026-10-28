@@ -286,35 +286,14 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 		return false
 	}
 
-	// Slow path: user has device limit — need deterministic ordering.
-	d.mu.RLock()
-	ips := d.limitedIPs[email]
-	if ips != nil && ips[sourceIP] > 0 {
-		d.mu.RUnlock()
-		d.mu.Lock()
-		d.limitedIPs[email][sourceIP]++
-		d.mu.Unlock()
-		return false
-	}
-
-	if ips != nil && len(ips) < limit {
-		d.mu.RUnlock()
-		d.mu.Lock()
-		if d.limitedIPs[email] == nil {
-			d.limitedIPs[email] = make(map[string]int)
-		}
-		d.limitedIPs[email][sourceIP]++
-		d.mu.Unlock()
-		return false
-	}
-	d.mu.RUnlock()
-
-	// Over limit — need write lock for deterministic check.
+	// Slow path: user has device limit. All bookkeeping happens under the
+	// write lock with a re-check, so concurrent admissions can never push the
+	// count past the limit (an RLock fast path would let two goroutines pass
+	// the len<limit check before either acquires the write lock).
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Re-check under write lock.
-	ips = d.limitedIPs[email]
+	ips := d.limitedIPs[email]
 	if ips == nil {
 		ips = make(map[string]int)
 		d.limitedIPs[email] = ips
@@ -348,31 +327,67 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 }
 
 // delConn decrements the IP refcount when a connection closes.
+//
+// The refcount lives in the store the user's state pointed at when the
+// connection was ADMITTED, but the user's device limit can change at runtime
+// (sync.user.delta). Route by current state first, then fall back to the
+// other store: decrementing only the current-state store leaks the other one
+// and permanently occupies a device slot with a ghost IP.
 func (d *LimitDispatcher) delConn(email, sourceIP string) {
-	// Check if this is an unlimited user first (lock-free).
-	if v, ok := d.unlimitedIPs.Load(email); ok {
-		ic := v.(*ipCounter)
-		if rv, ok := ic.ips.Load(sourceIP); ok {
-			counter := rv.(*atomic.Int64)
-			if counter.Add(-1) <= 0 {
-				ic.ips.Delete(sourceIP)
-			}
+	d.mu.RLock()
+	_, limited := d.deviceLimits[email]
+	d.mu.RUnlock()
+
+	if !limited {
+		if d.decUnlimited(email, sourceIP) {
+			return
 		}
+		// Fall through: the connection may predate the limit grant.
+		d.decLimited(email, sourceIP)
 		return
 	}
+	if !d.decLimited(email, sourceIP) {
+		// Fall through: the connection may predate the limit release.
+		d.decUnlimited(email, sourceIP)
+	}
+}
 
-	// Limited user — use write lock.
+// decLimited decrements the limited-user refcount, reporting whether the
+// entry existed.
+func (d *LimitDispatcher) decLimited(email, sourceIP string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if ips, ok := d.limitedIPs[email]; ok {
-		ips[sourceIP]--
-		if ips[sourceIP] <= 0 {
-			delete(ips, sourceIP)
-		}
-		if len(ips) == 0 {
-			delete(d.limitedIPs, email)
-		}
+	ips, ok := d.limitedIPs[email]
+	if !ok || ips[sourceIP] <= 0 {
+		return false
 	}
+	ips[sourceIP]--
+	if ips[sourceIP] <= 0 {
+		delete(ips, sourceIP)
+	}
+	if len(ips) == 0 {
+		delete(d.limitedIPs, email)
+	}
+	return true
+}
+
+// decUnlimited decrements the unlimited-user refcount, reporting whether the
+// entry existed.
+func (d *LimitDispatcher) decUnlimited(email, sourceIP string) bool {
+	v, ok := d.unlimitedIPs.Load(email)
+	if !ok {
+		return false
+	}
+	ic := v.(*ipCounter)
+	rv, ok := ic.ips.Load(sourceIP)
+	if !ok {
+		return false
+	}
+	counter := rv.(*atomic.Int64)
+	if counter.Add(-1) <= 0 {
+		ic.ips.Delete(sourceIP)
+	}
+	return true
 }
 
 type closeTrackingWriter struct {

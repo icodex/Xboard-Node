@@ -232,6 +232,74 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	}
 }
 
+// A user whose device limit is granted at runtime keeps stale entries in
+// unlimitedIPs from earlier connections; delConn must still release the
+// limitedIPs refcount so no ghost IP occupies a device slot forever.
+func TestLimitDispatcher_DelConnAfterRuntimeLimitGrant(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+
+	// Unlimited era: connection tracked in unlimitedIPs.
+	ld.UpdateLimits(map[string]int{email: 1}, nil)
+	if ld.checkDeviceLimit(email, "1.1.1.1") {
+		t.Fatal("unlimited user should be allowed")
+	}
+
+	// Admin grants device limit 1 at runtime.
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1})
+
+	// New connection goes through the limited path.
+	if ld.checkDeviceLimit(email, "2.2.2.2") {
+		t.Fatal("first limited connection should be allowed")
+	}
+
+	// Close the limited-era connection: slot must be released even though
+	// a stale unlimitedIPs entry exists for this email.
+	ld.delConn(email, "2.2.2.2")
+
+	aliveIPs, _ := ld.GetConnectionState()
+	ips := aliveIPs[1]
+	if len(ips) != 1 || !ips["1.1.1.1"] {
+		t.Fatalf("alive IPs = %v, want only the pre-grant connection 1.1.1.1", ips)
+	}
+	if ld.checkDeviceLimit(email, "3.3.3.3") {
+		t.Fatal("closing a limited connection must free the slot for a new IP")
+	}
+}
+
+// The old checkDeviceLimit read ips[sourceIP]>0 under RLock, then incremented
+// under Lock: a concurrent delConn could delete the entry in between, and the
+// increment resurrected a refcount from nothing — a ghost device slot that
+// no close can release. Under the write-lock re-check, admit/close cycles on
+// the same IP must net out to zero.
+func TestLimitDispatcher_AdmitCloseNoGhostResurrection(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1})
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				if !ld.checkDeviceLimit(email, "1.1.1.1") {
+					ld.delConn(email, "1.1.1.1")
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Every admitted connection was closed: no refcount may survive.
+	ld.mu.RLock()
+	_, ghost := ld.limitedIPs[email]
+	ld.mu.RUnlock()
+	if ghost {
+		t.Fatal("ghost refcount survived admit/close cycles")
+	}
+}
+
 // GetConnectionState copies limited-IP maps while holding RLock; concurrent
 // delConn must not race (fatal under -race without the copy).
 func TestLimitDispatcher_GetConnectionState_ConcurrentWithClose(t *testing.T) {
