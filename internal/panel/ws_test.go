@@ -322,3 +322,43 @@ func TestWSClient_ConcurrentSendDuringReconnect(t *testing.T) {
 		ws.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}})
 	}
 }
+
+// A peer that never answers the close frame must not block Run after ctx
+// cancel: the read goroutine has no deadline, so connect() closes the conn
+// from a watcher goroutine to unblock it.
+func TestWSClient_ShutdownUnblocksWhenPeerSilent(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if err := conn.WriteJSON(wsMessage{Event: "auth.success"}); err != nil {
+			return
+		}
+		// Go silent: never read, never answer the client's close frame.
+		time.Sleep(5 * time.Second)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	ws := NewWSClient("ws://"+host, "silent-token", 1, WSClientConfig{}, nil, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ws.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(300 * time.Millisecond) // let it connect and authenticate
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s after ctx cancel (blocked on silent peer)")
+	}
+}

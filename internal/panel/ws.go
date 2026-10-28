@@ -224,6 +224,14 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	conn.SetReadLimit(10 << 20) // 10MB max message size
 
+	// Force the read goroutine to unblock on shutdown: conn.ReadJSON has no
+	// deadline, so a peer that never answers the close frame would otherwise
+	// hold the <-done wait below indefinitely.
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
+
 	// Read first message — expect auth.success or error
 	var firstMsg wsMessage
 	if err := conn.ReadJSON(&firstMsg); err != nil {
