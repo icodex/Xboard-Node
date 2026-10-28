@@ -138,3 +138,49 @@ func TestUsersResponse_Unmarshal(t *testing.T) {
 		t.Errorf("user[1].device_limit: got %d", resp.Users[1].DeviceLimit)
 	}
 }
+
+// PHP encodes empty maps as [] on the wire. Every map-typed NodeConfig field
+// must survive the weak decode as an empty map instead of failing (the
+// hysteria fork shipped a startup-blocking variant of this bug; lock it here).
+func TestNodeConfig_PHPEmptyArrayTolerance(t *testing.T) {
+	raw := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(`{
+		"protocol": "vmess",
+		"server_port": 10004,
+		"listen_ip": "0.0.0.0",
+		"network": "tcp",
+		"networkSettings": [],
+		"tls_settings": [],
+		"custom_outbounds": [
+			{"tag": "empty-direct", "protocol": "direct", "settings": []},
+			{"tag": "with-settings", "protocol": "socks", "settings": {"server": "1.2.3.4", "server_port": 1080}}
+		],
+		"custom_routes": [],
+		"custom_route_rules": []
+	}`), &raw); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+
+	var cfg NodeConfig
+	if err := decodeWeakRaw(raw, &cfg); err != nil {
+		t.Fatalf("weak decode must tolerate PHP empty arrays: %v", err)
+	}
+	if cfg.NetworkSettings == nil {
+		t.Error("networkSettings [] should decode to an empty map, got nil")
+	}
+	if cfg.TLSSettings == nil {
+		t.Error("tls_settings [] should decode to an empty map, got nil")
+	}
+	if len(cfg.CustomRoutes) != 0 {
+		t.Errorf("custom_routes [] should decode to empty slice, got %v", cfg.CustomRoutes)
+	}
+	if len(cfg.CustomOutbounds) != 2 {
+		t.Fatalf("custom_outbounds: got %d entries, want 2", len(cfg.CustomOutbounds))
+	}
+	if cfg.CustomOutbounds[0].Settings == nil {
+		t.Error("outbound settings [] should decode to an empty map, got nil")
+	}
+	if cfg.CustomOutbounds[1].Settings["server"] != "1.2.3.4" {
+		t.Errorf("populated settings must survive: %v", cfg.CustomOutbounds[1].Settings)
+	}
+}
