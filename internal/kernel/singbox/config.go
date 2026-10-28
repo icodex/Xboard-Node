@@ -459,7 +459,7 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 	case "naive":
 		return buildNaive(base, nc, users, tc)
 	case "socks":
-		return buildSocks(base, users)
+		return buildSocks(base, users, nc)
 	case "http":
 		return buildHTTP(base, nc, users, tc)
 	case "mieru":
@@ -784,8 +784,15 @@ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
 	return base
 }
 
-func buildSocks(base M, users []model.UserSpec) M {
+func buildSocks(base M, users []model.UserSpec, nc *model.NodeSpec) M {
 	base["type"] = "socks"
+
+	// sing-box socks inbound has no TLS option: the panel's tls=1 is silently
+	// dropped and the inbound serves plaintext. Surface it like the other
+	// dropped panel fields (xray refuses socks outright).
+	if nc.TLS == 1 {
+		nlog.Core().Warn("sing-box socks inbound does not support TLS; panel tls=1 is ignored and the inbound serves plaintext")
+	}
 
 	userList := make([]M, 0, len(users))
 	for _, u := range users {
