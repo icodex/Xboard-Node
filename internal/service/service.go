@@ -549,9 +549,11 @@ func (s *Service) handleWSStatus(ctx context.Context, status controlplane.Status
 //     WS enabled. If so, create and start a WS client. This handles the case
 //     where WS was not enabled at startup but enabled later.
 //
-//  2. WS disconnected for >10 min: Re-handshake to check if WS config changed.
-//     If WS is now disabled, stop the WS client and switch to REST-only.
-//     If WS config changed (different URL/channel), restart with new config.
+//  2. WS disconnected for >10 min: Re-handshake to check if the panel still
+//     has WS enabled. If it was disabled, stop the WS client and switch to
+//     REST-only. An existing client is never replaced here: it reconnects
+//     itself with its original URL, so a changed ws_url only takes effect on
+//     service restart or config reload.
 func (s *Service) wsDiscovery(ctx context.Context) {
 	if !s.source.SupportsDiscovery() {
 		return
