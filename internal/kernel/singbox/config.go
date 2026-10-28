@@ -435,9 +435,18 @@ func mergeCustomSingboxRoute(cfg M, customRoute map[string]any) {
 }
 
 func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	// Dual-stack wildcard by default; honor the panel's listen_ip only when
+	// it names a concrete address (the panel sends 0.0.0.0 today, which must
+	// NOT downgrade the listener to v4-only).
+	listen := "::"
+	switch nc.ListenIP {
+	case "", "0.0.0.0", "::":
+	default:
+		listen = nc.ListenIP
+	}
 	base := M{
 		"tag":         nc.Protocol + "-in",
-		"listen":      "::",
+		"listen":      listen,
 		"listen_port": nc.ServerPort,
 	}
 

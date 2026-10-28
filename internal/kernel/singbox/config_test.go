@@ -983,3 +983,29 @@ func TestBuildInbound_ProxyProtocolWarnsOnly(t *testing.T) {
 		t.Error("proxy_protocol must not appear in sing-box inbound config")
 	}
 }
+
+func TestBuildInbound_ListenIP(t *testing.T) {
+	tests := []struct {
+		name     string
+		listenIP string
+		want     string
+	}{
+		{name: "empty stays dual-stack", listenIP: "", want: "::"},
+		{name: "v4 wildcard stays dual-stack", listenIP: "0.0.0.0", want: "::"},
+		{name: "v6 wildcard stays dual-stack", listenIP: "::", want: "::"},
+		{name: "concrete address honored", listenIP: "127.0.0.1", want: "127.0.0.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := &panel.NodeConfig{
+				Protocol:   "socks",
+				ServerPort: 10019,
+				ListenIP:   tt.listenIP,
+			}
+			inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+			if inbound["listen"] != tt.want {
+				t.Errorf("listen = %v, want %v", inbound["listen"], tt.want)
+			}
+		})
+	}
+}
