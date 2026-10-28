@@ -411,3 +411,48 @@ func TestWSClient_RequestsDeviceStateOnConnect(t *testing.T) {
 		}
 	}
 }
+
+// The panel encodes an empty device snapshot as [] (PHP empty array); the
+// event must still decode (as an empty map) instead of being dropped.
+func TestWSClient_EmptyDevicesPayloadDecodes(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantNil bool
+		wantUID int
+		wantIPs int
+	}{
+		{name: "empty array payload", data: `{"users":[],"node_id":3}`, wantNil: true},
+		{name: "empty object payload", data: `{"users":{},"node_id":3}`, wantNil: true},
+		{name: "populated payload", data: `{"users":{"5":["1.2.3.4","5.6.7.8"]},"node_id":3}`, wantUID: 5, wantIPs: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got *WSEvent
+			ws := NewWSClient("ws://unused", "tok", 1, WSClientConfig{}, func(ev WSEvent) {
+				got = &ev
+			}, nil, nil)
+
+			ws.handleMessage(wsMessage{
+				Event: WSEventSyncDevices,
+				Data:  json.RawMessage(tt.data),
+			})
+
+			if got == nil {
+				t.Fatal("devices event was dropped")
+			}
+			if tt.wantNil {
+				if len(got.DeviceUsers) != 0 {
+					t.Fatalf("DeviceUsers = %v, want empty", got.DeviceUsers)
+				}
+				return
+			}
+			if len(got.DeviceUsers) != 1 || got.NodeID != 3 {
+				t.Fatalf("DeviceUsers = %v, NodeID = %d", got.DeviceUsers, got.NodeID)
+			}
+			if ips := got.DeviceUsers[tt.wantUID]; len(ips) != tt.wantIPs {
+				t.Fatalf("user %d IPs = %v, want %d", tt.wantUID, ips, tt.wantIPs)
+			}
+		})
+	}
+}

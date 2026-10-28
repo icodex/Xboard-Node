@@ -435,8 +435,19 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 
 	case WSEventSyncDevices:
 		nlog.Core().Debug("ws sync devices event received")
+		var raw map[string]interface{}
+		if err := json.Unmarshal(msg.Data, &raw); err != nil {
+			nlog.Core().Warn("ws: cannot decode devices payload", "error", err)
+			return
+		}
+		// The panel encodes an empty device snapshot as [] (a PHP empty
+		// array); mapstructure does not weakly convert a slice to a map, so
+		// normalize it to an empty object or the event is dropped entirely.
+		if users, ok := raw["users"].([]interface{}); ok && len(users) == 0 {
+			raw["users"] = map[string]interface{}{}
+		}
 		var p syncDevicesPayload
-		if err := decodeData(msg.Data, &p); err != nil {
+		if err := decodeWeakRaw(raw, &p); err != nil {
 			nlog.Core().Warn("ws: cannot decode devices payload", "error", err)
 			return
 		}
