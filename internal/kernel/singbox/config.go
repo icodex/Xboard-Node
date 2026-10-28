@@ -1023,10 +1023,13 @@ func applyMultiplex(base M, nc *model.NodeSpec) {
 }
 
 func applyProxyProtocol(base M, nc *model.NodeSpec) {
-	// if !nc.GetProxyProtocol() {
-	// 	return
-	// }
-	// base["proxy_protocol"] = true
+	// sing-box has no inbound proxy_protocol option: behind a PROXY-protocol
+	// frontend every source IP would be the frontend's (device limits and
+	// alive IPs wrong). Surface the dropped panel field like the vmess+Reality
+	// case does; the xray kernel honors it.
+	if nc.GetProxyProtocol() {
+		nlog.Core().Warn("sing-box does not support proxy protocol, ignoring; source IPs will be the frontend's", "protocol", nc.Protocol)
+	}
 }
 
 // extractECHInbound extracts ECH config for sing-box server (inbound).

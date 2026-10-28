@@ -965,3 +965,21 @@ func TestBuildInbound_Shadowsocks2022ChachaRejected(t *testing.T) {
 		t.Fatalf("chacha20-poly1305 multi-user inbound must be rejected, got %+v", inbound)
 	}
 }
+
+func TestBuildInbound_ProxyProtocolWarnsOnly(t *testing.T) {
+	// sing-box has no inbound proxy_protocol support: the field must be
+	// dropped (applyProxyProtocol warns) without leaking any option into the
+	// generated config.
+	nc := &panel.NodeConfig{
+		Protocol:            "vmess",
+		ServerPort:          10086,
+		AcceptProxyProtocol: true,
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if inbound == nil {
+		t.Fatal("inbound must still be built")
+	}
+	if _, ok := inbound["proxy_protocol"]; ok {
+		t.Error("proxy_protocol must not appear in sing-box inbound config")
+	}
+}
