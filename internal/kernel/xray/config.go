@@ -46,11 +46,19 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		outbounds = append(outbounds, M{"protocol": "blackhole", "tag": "block"})
 	}
 
+	// Level: panel spec (kernel_log_level) wins over kernel.log_level, which
+	// setDefaultsFrom already derives from log.level. Access log stays off —
+	// it is info-level and would flood stdout at log.level: info. The error
+	// log follows log.output when it points at a file ("" = stdout).
+	kernelLevel := nc.KernelLogLevel
+	if kernelLevel == "" {
+		kernelLevel = kcfg.LogLevel
+	}
 	cfg := M{
 		"log": M{
-			"loglevel": xrayLogLevel(kcfg.LogLevel),
-			"error":    "",
-			"access":   "",
+			"loglevel": xrayLogLevel(kernelLevel),
+			"error":    xrayErrorPath(kcfg.LogOutput),
+			"access":   "none",
 		},
 		"stats": M{},
 		"policy": M{
@@ -178,20 +186,35 @@ func mergeCustomXrayRouting(cfg M, customRouting map[string]any) {
 	}
 }
 
-func xrayLogLevel(singboxLevel string) string {
-	switch singboxLevel {
+func xrayLogLevel(level string) string {
+	switch level {
 	case "trace", "debug":
 		return "debug"
 	case "info":
 		return "info"
-	case "warn":
+	case "warn", "warning":
 		return "warning"
 	case "error":
 		return "error"
 	case "fatal", "panic":
-		return "error"
+		// Near-silent, matching sing-box fatal semantics. Startup failures
+		// still surface as Go errors from Start, not through this log.
+		return "none"
 	default:
+		// Unknown values are rejected by config validation; this is a
+		// defensive fallback (per-node KernelOverride bypasses validation).
 		return "warning"
+	}
+}
+
+// xrayErrorPath maps log.output to the xray error-log path: a file path is
+// honored, stdout/stderr/unset keep xray's default (stdout).
+func xrayErrorPath(output string) string {
+	switch output {
+	case "", "stdout", "stderr":
+		return ""
+	default:
+		return output
 	}
 }
 

@@ -54,6 +54,105 @@ log:
 	}
 }
 
+// Kernel log level derives from log.level when kernel.log_level is unset.
+func TestLoad_KernelLogLevelDerivedFromLogLevel(t *testing.T) {
+	path := writeTemp(t, `
+panel:
+  url: "https://panel.example.com"
+  token: "tok"
+  node_id: 1
+log:
+  level: debug
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Kernel.LogLevel != "debug" {
+		t.Errorf("kernel.log_level: got %q, want debug (derived)", cfg.Kernel.LogLevel)
+	}
+	if cfg.Kernel.LogOutput != "stdout" {
+		t.Errorf("kernel.log_output: got %q, want stdout", cfg.Kernel.LogOutput)
+	}
+}
+
+// Explicit kernel.log_level still wins over log.level.
+func TestLoad_KernelLogLevelOverride(t *testing.T) {
+	path := writeTemp(t, `
+panel:
+  url: "https://panel.example.com"
+  token: "tok"
+  node_id: 1
+kernel:
+  log_level: error
+log:
+  level: debug
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Kernel.LogLevel != "error" {
+		t.Errorf("kernel.log_level: got %q, want error (explicit wins)", cfg.Kernel.LogLevel)
+	}
+}
+
+// warning folds into warn; invalid levels fail config load.
+func TestNormalizeLogLevel(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"empty is unset", "", "", false},
+		{"trace", "trace", "trace", false},
+		{"debug", "debug", "debug", false},
+		{"info", "info", "info", false},
+		{"warn", "warn", "warn", false},
+		{"warning folds", "warning", "warn", false},
+		{"error", "error", "error", false},
+		{"fatal", "fatal", "fatal", false},
+		{"panic folds", "panic", "fatal", false},
+		{"case insensitive", "DEBUG", "debug", false},
+		{"invalid", "verbose", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeLogLevel(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NormalizeLogLevel(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("NormalizeLogLevel(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoad_InvalidLogLevels(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"bad log.level", "log:\n  level: verbose\n"},
+		{"bad kernel.log_level", "kernel:\n  log_level: verbose\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTemp(t, `
+panel:
+  url: "https://panel.example.com"
+  token: "tok"
+  node_id: 1
+`+tt.yaml)
+			if _, err := Load(path); err == nil {
+				t.Errorf("Load: expected error for invalid level")
+			}
+		})
+	}
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	path := writeTemp(t, `
 panel:
@@ -73,8 +172,12 @@ panel:
 	if cfg.Kernel.ConfigDir != expectedDir {
 		t.Errorf("default config_dir: got %q, want %q", cfg.Kernel.ConfigDir, expectedDir)
 	}
-	if cfg.Kernel.LogLevel != "warn" {
-		t.Errorf("default kernel log_level: got %q, want warn", cfg.Kernel.LogLevel)
+	// kernel.log_level unset derives from the log.level default (info).
+	if cfg.Kernel.LogLevel != "info" {
+		t.Errorf("default kernel log_level: got %q, want info (derived from log.level)", cfg.Kernel.LogLevel)
+	}
+	if cfg.Kernel.LogOutput != "stdout" {
+		t.Errorf("default kernel log_output: got %q, want stdout", cfg.Kernel.LogOutput)
 	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log.level: got %q, want info", cfg.Log.Level)

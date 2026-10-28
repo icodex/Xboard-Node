@@ -522,9 +522,10 @@ func TestBuildConfig(t *testing.T) {
 		t.Error("empty JSON output")
 	}
 
+	// The factory level is pinned at "panic" (its own stderr path stays inert);
+	// kernel logs flow through nlogBridge instead.
 	logCfg := cfg["log"].(M)
-	assertMapValue(t, logCfg, "level", "info")
-	assertMapValue(t, logCfg, "timestamp", true)
+	assertMapValue(t, logCfg, "level", "panic")
 
 	outbounds := cfg["outbounds"].([]M)
 	if len(outbounds) != 2 {

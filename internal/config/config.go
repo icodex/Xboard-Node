@@ -122,6 +122,11 @@ type KernelConfig struct {
 	ConfigDir string `yaml:"config_dir"`
 	LogLevel  string `yaml:"log_level"`
 
+	// LogOutput mirrors Log.Output (filled in setDefaultsFrom, not
+	// user-facing). Kernels that log outside nlog (xray error log) use it
+	// to honor the log.output setting.
+	LogOutput string `yaml:"-"`
+
 	// GeoDataDir is the directory that contains GeoIP/GeoSite database files.
 	// For sing-box: geoip.db and geosite.db (geoip2-format).
 	// For xray:     geoip.dat and geosite.dat.
@@ -563,15 +568,19 @@ func (c *Config) setDefaultsFrom(baseDir string) {
 	if c.Kernel.GeoDataDir == "" {
 		c.Kernel.GeoDataDir = c.Kernel.ConfigDir
 	}
-	if c.Kernel.LogLevel == "" {
-		c.Kernel.LogLevel = "warn"
-	}
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
 	if c.Log.Output == "" {
 		c.Log.Output = "stdout"
 	}
+	// Kernel log level derives from log.level when kernel.log_level is not
+	// set explicitly (config.yml log: section is the single source of truth;
+	// kernel.log_level stays as an override, panel kernel_log_level wins).
+	if c.Kernel.LogLevel == "" {
+		c.Kernel.LogLevel = c.Log.Level
+	}
+	c.Kernel.LogOutput = c.Log.Output
 	if c.Cert.CertDir == "" {
 		c.Cert.CertDir = filepath.Join(c.Kernel.ConfigDir, "certs")
 	}
@@ -687,7 +696,37 @@ func normalizeBaseURL(raw string) (string, string, error) {
 	return normalized, slug, nil
 }
 
+// NormalizeLogLevel validates and canonicalizes a log level string.
+// Accepted: trace/debug/info/warn/warning/error/fatal/panic ("" = unset).
+// "warning" folds into "warn"; "panic" folds into "fatal".
+func NormalizeLogLevel(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return "", nil
+	case "trace":
+		return "trace", nil
+	case "debug":
+		return "debug", nil
+	case "info":
+		return "info", nil
+	case "warn", "warning":
+		return "warn", nil
+	case "error":
+		return "error", nil
+	case "fatal", "panic":
+		return "fatal", nil
+	default:
+		return "", fmt.Errorf("invalid log level %q (want trace/debug/info/warn/error/fatal)", s)
+	}
+}
+
 func (c *Config) validate() error {
+	if _, err := NormalizeLogLevel(c.Log.Level); err != nil {
+		return fmt.Errorf("log.level: %w", err)
+	}
+	if _, err := NormalizeLogLevel(c.Kernel.LogLevel); err != nil {
+		return fmt.Errorf("kernel.log_level: %w", err)
+	}
 	if c.IsStandalone() {
 		if err := c.validateStandalone(); err != nil {
 			return err
@@ -813,13 +852,18 @@ func (c *Config) ExpandMachineNode(nodeID int, nodeType string) *Config {
 }
 
 func InitLogger(cfg LogConfig) {
+	level, err := NormalizeLogLevel(cfg.Level)
+	if err != nil || level == "" {
+		level = "info"
+	}
 	var minLevel slog.Level
-	switch cfg.Level {
-	case "debug":
+	switch level {
+	case "trace", "debug":
 		minLevel = slog.LevelDebug
 	case "warn":
 		minLevel = slog.LevelWarn
-	case "error":
+	case "error", "fatal":
+		// nlog has no slot above ERROR; fatal only silences further.
 		minLevel = slog.LevelError
 	default:
 		minLevel = slog.LevelInfo

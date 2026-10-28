@@ -462,7 +462,10 @@ func TestBuildConfig_LogLevel(t *testing.T) {
 		{"debug", "debug"},
 		{"info", "info"},
 		{"warn", "warning"},
+		{"warning", "warning"},
 		{"error", "error"},
+		{"fatal", "none"},
+		{"panic", "none"},
 		{"", "warning"},
 	}
 
@@ -473,6 +476,57 @@ func TestBuildConfig_LogLevel(t *testing.T) {
 				t.Errorf("xrayLogLevel(%q) = %q, want %q", tc.input, result, tc.expected)
 			}
 		})
+	}
+}
+
+// Panel-pushed kernel_log_level (NodeSpec) wins over kernel.log_level.
+func TestBuildConfig_SpecLogLevelPriority(t *testing.T) {
+	nc := panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 443,
+	}
+	spec := testNodeSpec(&nc)
+	spec.KernelLogLevel = "error"
+
+	cfg := buildConfig(testKernelCfg, spec, testUsers, kernel.TLSCert{})
+	logCfg := cfg["log"].(M)
+	if got := logCfg["loglevel"]; got != "error" {
+		t.Errorf("loglevel: got %v, want error (spec wins)", got)
+	}
+
+	// Without a spec override the kernel config level applies.
+	spec.KernelLogLevel = ""
+	cfg = buildConfig(testKernelCfg, spec, testUsers, kernel.TLSCert{})
+	logCfg = cfg["log"].(M)
+	if got := logCfg["loglevel"]; got != "warning" {
+		t.Errorf("loglevel: got %v, want warning (kcfg fallback)", got)
+	}
+}
+
+// log.output as a file path lands in the error-log path; access stays off.
+func TestBuildConfig_LogOutput(t *testing.T) {
+	nc := panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 443,
+	}
+	spec := testNodeSpec(&nc)
+
+	kcfg := testKernelCfg
+	kcfg.LogOutput = "/var/log/xboard-node/kernel.log"
+	cfg := buildConfig(kcfg, spec, testUsers, kernel.TLSCert{})
+	logCfg := cfg["log"].(M)
+	if got := logCfg["error"]; got != "/var/log/xboard-node/kernel.log" {
+		t.Errorf("error path: got %v, want file path", got)
+	}
+	if got := logCfg["access"]; got != "none" {
+		t.Errorf("access: got %v, want none", got)
+	}
+
+	kcfg.LogOutput = "stdout"
+	cfg = buildConfig(kcfg, spec, testUsers, kernel.TLSCert{})
+	logCfg = cfg["log"].(M)
+	if got := logCfg["error"]; got != "" {
+		t.Errorf("error path: got %v, want empty (stdout default)", got)
 	}
 }
 

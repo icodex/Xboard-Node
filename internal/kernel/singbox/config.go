@@ -45,10 +45,13 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		outbounds = append(outbounds, M{"type": "block", "tag": "block"})
 	}
 
+	// The sing-box log factory is pinned at "panic" so its own stderr path
+	// stays inert; every entry is forwarded to the nlogBridge PlatformWriter
+	// instead (see Start), where level mapping, downgrade and output follow
+	// the unified config.yml log settings.
 	cfg := M{
 		"log": M{
-			"level":     kcfg.LogLevel,
-			"timestamp": true,
+			"level": "panic",
 		},
 		"outbounds": outbounds,
 	}

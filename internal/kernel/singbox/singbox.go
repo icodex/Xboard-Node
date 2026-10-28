@@ -36,10 +36,11 @@ const drainTimeout = 5 * time.Second
 type SingBox struct {
 	cfg config.KernelConfig
 
-	mu     sync.RWMutex
-	box    *box.Box
-	ctx    context.Context
-	cancel context.CancelFunc
+	mu        sync.RWMutex
+	box       *box.Box
+	logBridge *nlogBridge
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	users      []model.UserSpec
 	nodeConfig *model.NodeSpec
@@ -103,6 +104,15 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 
 	nlog.Core().Debug("sing-box config generated", "len", len(data))
 
+	// Kernel logs flow through the nlogBridge (PlatformWriter); the effective
+	// level mirrors the xray side: panel spec wins, then kernel.log_level
+	// (already derived from log.level in setDefaultsFrom).
+	kernelLevel := nodeConfig.KernelLogLevel
+	if kernelLevel == "" {
+		kernelLevel = s.cfg.LogLevel
+	}
+	logBridge := newNlogBridge(kernelLevel)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = include.Context(ctx)
 
@@ -113,8 +123,9 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	}
 
 	instance, err := box.New(box.Options{
-		Context: ctx,
-		Options: opts,
+		Context:           ctx,
+		Options:           opts,
+		PlatformLogWriter: logBridge,
 	})
 	if err != nil {
 		cancel()
@@ -129,6 +140,7 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 
 	// New instance started successfully — swap state.
 	s.box = instance
+	s.logBridge = logBridge
 	s.ctx = ctx
 	s.cancel = cancel
 	s.users = users
@@ -192,6 +204,17 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 	}
 
 	nopFactory := singLog.NewNOPFactory()
+
+	// Hot-update the log bridge level: panel kernel_log_level changes ride
+	// Reload (hash change) without a box rebuild — mirrors the xray side,
+	// which full-restarts on the same signal.
+	kernelLevel := nodeConfig.KernelLogLevel
+	if kernelLevel == "" {
+		kernelLevel = s.cfg.LogLevel
+	}
+	if s.logBridge != nil {
+		s.logBridge.SetLevel(kernelLevel)
+	}
 
 	// Configuration hash check for inbound reconstruction
 	tlsChanged := !bytes.Equal(s.tls.CertPEM, tls.CertPEM) || !bytes.Equal(s.tls.KeyPEM, tls.KeyPEM)
