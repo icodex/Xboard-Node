@@ -351,3 +351,27 @@ func TestResolveModeFor_CertDirWithDefaultFiles(t *testing.T) {
 		t.Errorf("expected mode file, got %q", mode)
 	}
 }
+
+// tearDownACME must keep the in-memory material: until a new configuration
+// produces valid PEM, the old material is the only thing keeping TLS
+// validation and warm restarts alive. A failed Reconfigure used to wipe it.
+func TestTearDownACME_KeepsMaterial(t *testing.T) {
+	certPEM, keyPEM := generateSelfSignedPair(t, "keepme.test")
+	m := NewManager(config.CertConfig{CertMode: "dns", Domain: "keepme.test"})
+	m.mat.Store(&certMaterial{certPEM: certPEM, keyPEM: keyPEM})
+	m.acmeStarted = true
+	m.acmeFingerprint = "stale"
+
+	m.tearDownACME()
+
+	if m.acmeStarted || m.magic != nil {
+		t.Fatal("tear-down should clear ACME state")
+	}
+	if !m.HasCert() {
+		t.Fatal("tear-down must not drop the in-memory cert material")
+	}
+	tls := m.TLSCert()
+	if string(tls.CertPEM) != string(certPEM) || string(tls.KeyPEM) != string(keyPEM) {
+		t.Fatal("TLSCert changed after tear-down")
+	}
+}

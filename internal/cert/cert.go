@@ -182,7 +182,9 @@ func (m *Manager) Reconfigure(ctx context.Context, newCfg config.CertConfig) (bo
 }
 
 // tearDownACME cancels the running certmagic background goroutines and clears
-// related state so a fresh ACME init can run.
+// related state so a fresh ACME init can run. The in-memory cert material is
+// deliberately kept: until the new configuration produces valid PEM, the old
+// material is the only thing keeping TLS validation and warm restarts alive.
 func (m *Manager) tearDownACME() {
 	if m.acmeCancel != nil {
 		m.acmeCancel()
@@ -191,7 +193,6 @@ func (m *Manager) tearDownACME() {
 	m.magic = nil
 	m.acmeStarted = false
 	m.acmeFingerprint = ""
-	m.mat.Store(nil)
 }
 
 // acmeFingerprint produces a stable string capturing every config field that
@@ -450,6 +451,12 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 		return fmt.Errorf("cert.domain is required for ACME modes (http/dns)")
 	}
 
+	// Snapshot the ACME-relevant config: the certmagic callbacks below run on
+	// their own goroutines and must not read m.cfg, which Reconfigure mutates
+	// concurrently (data race).
+	domain := m.cfg.Domain
+	email := m.cfg.Email
+
 	if err := os.MkdirAll(m.cfg.CertDir, 0o755); err != nil {
 		return fmt.Errorf("create cert dir: %w", err)
 	}
@@ -477,19 +484,19 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 			if issuerKey == "" {
 				return nil
 			}
-			if err := m.loadPEMFromStorage(evtCtx, storage, issuerKey, m.cfg.Domain); err != nil {
+			if err := m.loadPEMFromStorage(evtCtx, storage, issuerKey, domain); err != nil {
 				nlog.Core().Error("failed to reload cert after renewal", "error", err)
 				return nil
 			}
 			m.renewed.Store(true)
-			nlog.Core().Info("TLS certificate reloaded after renewal", "domain", m.cfg.Domain)
+			nlog.Core().Info("TLS certificate reloaded after renewal", "domain", domain)
 			return nil
 		},
 	})
 
 	issuer := certmagic.ACMEIssuer{
 		CA:    certmagic.LetsEncryptProductionCA,
-		Email: m.cfg.Email,
+		Email: email,
 	}
 
 	if dnsSolver != nil {
@@ -515,18 +522,18 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 	// Derived ctx so Reconfigure can cancel ACME background goroutines.
 	acmeCtx, acmeCancel := context.WithCancel(ctx)
 
-	if err := magic.ObtainCertSync(acmeCtx, m.cfg.Domain); err != nil {
+	if err := magic.ObtainCertSync(acmeCtx, domain); err != nil {
 		acmeCancel()
 		return fmt.Errorf("obtain certificate: %w", err)
 	}
 
 	issuerKey := magic.Issuers[0].IssuerKey()
-	if err := m.loadPEMFromStorage(acmeCtx, storage, issuerKey, m.cfg.Domain); err != nil {
+	if err := m.loadPEMFromStorage(acmeCtx, storage, issuerKey, domain); err != nil {
 		acmeCancel()
 		return fmt.Errorf("load cert from storage: %w", err)
 	}
 
-	if err := magic.ManageAsync(acmeCtx, []string{m.cfg.Domain}); err != nil {
+	if err := magic.ManageAsync(acmeCtx, []string{domain}); err != nil {
 		acmeCancel()
 		return fmt.Errorf("start cert manager: %w", err)
 	}
