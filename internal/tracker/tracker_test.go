@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"testing"
+	"time"
 )
 
 func TestProcess_InitialTraffic(t *testing.T) {
@@ -259,5 +260,47 @@ func TestMarkAliveIPsStale(t *testing.T) {
 	tr.MarkAliveIPsStale()
 	if again := tr.FlushAliveIPs(); again == nil || len(again[1]) != 1 {
 		t.Fatalf("after MarkAliveIPsStale flush should resend, got %v", again)
+	}
+}
+
+// Speeds must divide the cycle's bytes by the REAL cycle length, not a
+// hard-coded 10s: a non-default node.track_interval otherwise misreports
+// bytes/sec to the panel.
+func TestSpeed_UsesActualProcessInterval(t *testing.T) {
+	tests := []struct {
+		name        string
+		elapsed     time.Duration
+		cycleIn     int64
+		wantInSpeed int64
+	}{
+		{name: "default first tick", elapsed: 0, cycleIn: 1000, wantInSpeed: 100},
+		{name: "10s cycle", elapsed: 10 * time.Second, cycleIn: 1000, wantInSpeed: 100},
+		{name: "30s cycle", elapsed: 30 * time.Second, cycleIn: 3000, wantInSpeed: 100},
+		{name: "1s cycle", elapsed: time.Second, cycleIn: 100, wantInSpeed: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cycleSpeed(tt.cycleIn, tt.elapsed); got != tt.wantInSpeed {
+				t.Errorf("cycleSpeed(%d, %v) = %d, want %d", tt.cycleIn, tt.elapsed, got, tt.wantInSpeed)
+			}
+		})
+	}
+}
+
+func TestSpeed_ProcessIntervalRecorded(t *testing.T) {
+	tr := New()
+	tr.Process(map[int][2]int64{1: {100, 200}}, nil, 1)
+
+	s := tr.live.Load()
+	if s.processElapsed != defaultTrackInterval {
+		t.Errorf("first cycle elapsed = %v, want default %v", s.processElapsed, defaultTrackInterval)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	tr.Process(map[int][2]int64{1: {150, 250}}, nil, 1)
+
+	s = tr.live.Load()
+	if s.processElapsed <= 0 || s.processElapsed > defaultTrackInterval {
+		t.Errorf("second cycle elapsed = %v, want real (0,10s]", s.processElapsed)
 	}
 }

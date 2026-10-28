@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // snapshot is an immutable point-in-time view of tracker state.
@@ -17,6 +18,10 @@ type snapshot struct {
 	connCount int
 	inSpeed   int64
 	outSpeed  int64
+	// processElapsed is the wall-clock gap between this Process call and the
+	// previous one. Speeds are per-second over this interval, so a non-default
+	// track_interval still reports correct bytes/sec.
+	processElapsed time.Duration
 }
 
 // Tracker computes per-user traffic deltas from cumulative counters
@@ -49,6 +54,10 @@ type Tracker struct {
 
 	// lastAliveIPsHash detects changes to avoid duplicate reports.
 	lastAliveIPsHash string
+
+	// lastProcess is the wall-clock time of the previous Process call.
+	// Protected by mu — only written by Process.
+	lastProcess time.Time
 }
 
 func New() *Tracker {
@@ -77,6 +86,18 @@ func (t *Tracker) Process(
 ) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Measure the real cycle length so reported speeds stay correct when
+	// node.track_interval differs from the historical 10s default. The very
+	// first cycle has no previous sample and keeps the default.
+	now := time.Now()
+	elapsed := defaultTrackInterval
+	if !t.lastProcess.IsZero() {
+		if d := now.Sub(t.lastProcess); d > 0 {
+			elapsed = d
+		}
+	}
+	t.lastProcess = now
 
 	var cycleIn, cycleOut int64
 
@@ -114,12 +135,13 @@ func (t *Tracker) Process(
 
 	// Publish new snapshot (readers will see this atomically).
 	t.live.Store(&snapshot{
-		traffic:   copyTrafficMap(t.pendingTraffic),
-		aliveIPs:  kernelAliveIPs, // kernel provides fresh copy each tick
-		online:    online,
-		connCount: connCount,
-		inSpeed:   cycleIn,
-		outSpeed:  cycleOut,
+		traffic:        copyTrafficMap(t.pendingTraffic),
+		aliveIPs:       kernelAliveIPs, // kernel provides fresh copy each tick
+		online:         online,
+		connCount:      connCount,
+		inSpeed:        cycleIn,
+		outSpeed:       cycleOut,
+		processElapsed: elapsed,
 	})
 }
 
@@ -243,13 +265,28 @@ func (t *Tracker) ActiveConnections() int {
 // InboundSpeed returns the last observed inbound (download) speed in bytes/second.
 // Lock-free: reads from live snapshot.
 func (t *Tracker) InboundSpeed() int64 {
-	return t.live.Load().inSpeed / 10
+	s := t.live.Load()
+	return cycleSpeed(s.inSpeed, s.processElapsed)
 }
 
 // OutboundSpeed returns the last observed outbound (upload) speed in bytes/second.
 // Lock-free: reads from live snapshot.
 func (t *Tracker) OutboundSpeed() int64 {
-	return t.live.Load().outSpeed / 10
+	s := t.live.Load()
+	return cycleSpeed(s.outSpeed, s.processElapsed)
+}
+
+// defaultTrackInterval is the fallback cycle length used for the first
+// Process call and mirrors the node.track_interval default in config.
+const defaultTrackInterval = 10 * time.Second
+
+// cycleSpeed converts bytes-per-cycle into bytes-per-second over the cycle's
+// real duration.
+func cycleSpeed(cycleBytes int64, elapsed time.Duration) int64 {
+	if elapsed <= 0 {
+		elapsed = defaultTrackInterval
+	}
+	return int64(float64(cycleBytes) / elapsed.Seconds())
 }
 
 // copyTrafficMap creates a shallow copy of the traffic map.
