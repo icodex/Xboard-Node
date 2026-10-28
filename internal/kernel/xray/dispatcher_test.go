@@ -340,3 +340,94 @@ func TestLimitDispatcher_GetConnectionState_ConcurrentWithClose(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// Global device state from the panel must take part in admission: an IP
+// already known globally is an existing device (allowed, locally tracked),
+// merged sets count toward the limit, and rejection follows the same
+// lexicographic soft preference as the local-only path.
+func TestLimitDispatcher_GlobalDeviceMerge(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 2})
+
+	// Panel snapshot: another node already serves 8.8.8.8 for this user.
+	ld.SetGlobalDevicesByUID(map[int][]string{1: {"8.8.8.8"}})
+
+	if ld.checkDeviceLimit(email, "8.8.8.8") {
+		t.Fatal("IP known globally must be allowed and locally tracked")
+	}
+	if ld.checkDeviceLimit(email, "1.1.1.1") {
+		t.Fatal("second distinct IP should fill the remaining slot")
+	}
+	// Merged set {8.8.8.8, 1.1.1.1} is at limit; a candidate sorting after
+	// both must be rejected (lexicographic order, "9..." > "8...").
+	if !ld.checkDeviceLimit(email, "9.9.9.9") {
+		t.Fatal("candidate above all merged IPs must be rejected at limit")
+	}
+
+	// Alive reporting stays local: the global echo must not double-report.
+	ld.delConn(email, "1.1.1.1")
+	aliveIPs, _ := ld.GetConnectionState()
+	ips := aliveIPs[1]
+	if len(ips) != 1 || !ips["8.8.8.8"] {
+		t.Fatalf("alive IPs = %v, want only locally tracked 8.8.8.8", ips)
+	}
+}
+
+// A stale global snapshot must be ignored entirely (local-only semantics),
+// mirroring sing-box's 60s staleness fallback.
+func TestLimitDispatcher_GlobalStaleFallsBackToLocal(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 1})
+	ld.SetGlobalDevicesByUID(map[int][]string{1: {"8.8.8.8"}})
+
+	// Fresh snapshot: merged {8.8.8.8} is at limit, candidate sorting after
+	// it loses.
+	if !ld.checkDeviceLimit(email, "9.9.9.9") {
+		t.Fatal("fresh global state must count toward the limit")
+	}
+	ld.delConn(email, "9.9.9.9")
+
+	// Expire the snapshot: local-only admission admits again.
+	ld.globalMu.Lock()
+	ld.globalUpdatedAt = time.Now().Add(-2 * globalDeviceWindow)
+	ld.globalMu.Unlock()
+	if ld.checkDeviceLimit(email, "9.9.9.9") {
+		t.Fatal("stale global state must be ignored (local has a free slot)")
+	}
+}
+
+// The panel snapshot is keyed by panel user ID; the dispatcher must translate
+// through emailToUID and drop UIDs it does not know.
+func TestLimitDispatcher_GlobalByUIDTranslation(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(7)
+	ld.UpdateLimits(map[string]int{email: 7}, nil)
+
+	ld.SetGlobalDevicesByUID(map[int][]string{
+		7:  {"1.2.3.4"},
+		99: {"5.6.7.8"},
+	})
+
+	ld.globalMu.RLock()
+	got := ld.globalDevices[email]
+	_, hasUnknown := ld.globalDevices[userEmail(99)]
+	emptyForOthers := len(ld.globalDevices) == 1
+	ld.globalMu.RUnlock()
+
+	if len(got) != 1 || !got["1.2.3.4"] {
+		t.Fatalf("global devices for uid 7 = %v, want {1.2.3.4}", got)
+	}
+	if hasUnknown || !emptyForOthers {
+		t.Fatal("UIDs without an email mapping must be dropped")
+	}
+
+	ld.ClearGlobalDevices()
+	ld.globalMu.RLock()
+	cleared := len(ld.globalDevices) == 0 && ld.globalUpdatedAt.IsZero()
+	ld.globalMu.RUnlock()
+	if !cleared {
+		t.Fatal("ClearGlobalDevices must empty the snapshot")
+	}
+}

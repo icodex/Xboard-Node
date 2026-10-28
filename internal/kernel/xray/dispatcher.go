@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 	_ "unsafe"
 
 	xrayDispatcher "github.com/xtls/xray-core/app/dispatcher"
@@ -19,6 +20,11 @@ import (
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
 )
+
+// globalDeviceWindow is how long the panel-pushed global device state stays
+// trusted. Past it, admission falls back to local-only, mirroring sing-box's
+// ConnTracker.checkDeviceGate.
+const globalDeviceWindow = 60 * time.Second
 
 // Access xray's internal config creator registry so we can replace the
 // default dispatcher factory with ours. This runs AFTER xray's init()
@@ -49,9 +55,10 @@ func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{
 		return orig, nil
 	}
 	ld := &LimitDispatcher{
-		inner:      orig,
-		innerDisp:  inner,
-		limitedIPs: make(map[string]map[string]int),
+		inner:         orig,
+		innerDisp:     inner,
+		limitedIPs:    make(map[string]map[string]int),
+		globalDevices: make(map[string]map[string]bool),
 	}
 	globalLimitDispatcher.Store(ld)
 	nlog.Core().Debug("xray: limit dispatcher installed")
@@ -79,6 +86,13 @@ type LimitDispatcher struct {
 	// unlimitedIPs: users without device limit — sync.Map for lock-free access.
 	// Each entry is *ipCounter{ips sync.Map}.
 	unlimitedIPs sync.Map // email → *ipCounter
+
+	// Global device state pushed by the panel (sync.devices), keyed by email.
+	// Never written by connection bookkeeping — admission merges it with local
+	// state; alive-IP reports stay local-only (the panel aggregates globally).
+	globalMu        sync.RWMutex
+	globalDevices   map[string]map[string]bool
+	globalUpdatedAt time.Time
 
 	connCount atomic.Int64 // total active connections tracked by dispatcher
 }
@@ -286,6 +300,17 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 		return false
 	}
 
+	// Snapshot the global device state BEFORE taking d.mu (lock order:
+	// globalMu first, never nested the other way). Stale or empty state
+	// mirrors sing-box's checkDeviceGate and degrades to local-only.
+	d.globalMu.RLock()
+	globalFresh := !d.globalUpdatedAt.IsZero() && time.Since(d.globalUpdatedAt) <= globalDeviceWindow
+	var globalIPs map[string]bool
+	if globalFresh {
+		globalIPs = d.globalDevices[email]
+	}
+	d.globalMu.RUnlock()
+
 	// Slow path: user has device limit. All bookkeeping happens under the
 	// write lock with a re-check, so concurrent admissions can never push the
 	// count past the limit (an RLock fast path would let two goroutines pass
@@ -304,14 +329,31 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 		return false
 	}
 
-	if len(ips) < limit {
+	// Known globally (this or another node already serves this IP): allow and
+	// start local bookkeeping so alive-IP reports include the connection.
+	if globalIPs[sourceIP] {
+		ips[sourceIP]++
+		return false
+	}
+
+	// Merge local and global IP sets; the node's own report echoes back, so
+	// overlaps deduplicate naturally. Global IPs never enter the refcounts.
+	allIPs := make(map[string]struct{}, len(ips)+len(globalIPs)+1)
+	for ip := range ips {
+		allIPs[ip] = struct{}{}
+	}
+	for ip := range globalIPs {
+		allIPs[ip] = struct{}{}
+	}
+
+	if len(allIPs) < limit {
 		ips[sourceIP]++
 		return false
 	}
 
 	// Over limit — deterministic: allow lowest IPs lexicographically.
-	ipList := make([]string, 0, len(ips)+1)
-	for ip := range ips {
+	ipList := make([]string, 0, len(allIPs)+1)
+	for ip := range allIPs {
 		ipList = append(ipList, ip)
 	}
 	ipList = append(ipList, sourceIP)
@@ -324,6 +366,45 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 		}
 	}
 	return true
+}
+
+// SetGlobalDevicesByUID stores the panel-pushed global device snapshot
+// (sync.devices, keyed by panel user ID) translated to the dispatcher's
+// email keys. Connection bookkeeping never touches this store.
+func (d *LimitDispatcher) SetGlobalDevicesByUID(users map[int][]string) {
+	if users == nil {
+		users = map[int][]string{}
+	}
+
+	// Translate under d.mu.RLock (read-only), then publish under globalMu —
+	// never nested the other way around.
+	d.mu.RLock()
+	byEmail := make(map[string]map[string]bool, len(users))
+	for email, uid := range d.emailToUID {
+		ips, ok := users[uid]
+		if !ok {
+			continue
+		}
+		set := make(map[string]bool, len(ips))
+		for _, ip := range ips {
+			set[ip] = true
+		}
+		byEmail[email] = set
+	}
+	d.mu.RUnlock()
+
+	d.globalMu.Lock()
+	d.globalDevices = byEmail
+	d.globalUpdatedAt = time.Now()
+	d.globalMu.Unlock()
+}
+
+// ClearGlobalDevices drops the panel-pushed global device snapshot.
+func (d *LimitDispatcher) ClearGlobalDevices() {
+	d.globalMu.Lock()
+	d.globalDevices = make(map[string]map[string]bool)
+	d.globalUpdatedAt = time.Time{}
+	d.globalMu.Unlock()
 }
 
 // delConn decrements the IP refcount when a connection closes.
