@@ -230,6 +230,14 @@ func (o *Orchestrator) stopAll() {
 		<-h.done
 	}
 
+	// unregisterNode only clears mailboxes/statuses; drop the stale handles
+	// too so a completed stopAll leaves no zombie entries behind.
+	o.mu.Lock()
+	for id := range handles {
+		delete(o.nodes, id)
+	}
+	o.mu.Unlock()
+
 	if o.wsCancel != nil {
 		o.wsCancel()
 	}
