@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -88,6 +89,14 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	// node on the old state on every retry.
 	if s.box != nil {
 		s.stop()
+	}
+
+	// The pinned cache-file path lives under ConfigDir; multi-node layouts
+	// derive per-node dirs that nothing else is guaranteed to create.
+	if s.cfg.ConfigDir != "" {
+		if err := os.MkdirAll(s.cfg.ConfigDir, 0o755); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
 	}
 
 	cfgMap := buildConfig(s.cfg, nodeConfig, users, tls)

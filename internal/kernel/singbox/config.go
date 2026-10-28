@@ -826,6 +826,14 @@ func applyTransport(base M, nc *model.NodeSpec) {
 
 	transport := M{"type": nc.Network}
 
+	// sing-box matches the request path strictly ("" != "/"), so an empty
+	// panel path must become "/" or every ws/httpupgrade/h2 handshake 404s.
+	ensurePath := func(m M) {
+		if v, ok := m["path"]; !ok || v == "" {
+			m["path"] = "/"
+		}
+	}
+
 	if nc.NetworkSettings != nil {
 		switch nc.Network {
 		case "ws":
@@ -879,6 +887,13 @@ func applyTransport(base M, nc *model.NodeSpec) {
 				transport["host"] = v
 			}
 		}
+	}
+
+	// sing-box matches the request path strictly ("" != "/") regardless of
+	// whether the panel sent networkSettings at all.
+	switch transport["type"] {
+	case "ws", "httpupgrade", "http":
+		ensurePath(transport)
 	}
 
 	base["transport"] = transport
