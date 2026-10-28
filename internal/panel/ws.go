@@ -295,6 +295,11 @@ func (w *WSClient) connect(ctx context.Context) error {
 		}
 	}()
 
+	// Ask the panel for the full global device snapshot on every (re)connect:
+	// sync.devices is otherwise only pushed back to the node that just
+	// reported, so a fresh connection would hold no global state at all.
+	w.trySend(wsMessage{Event: "request.devices"}, "device request")
+
 	for {
 		select {
 		case <-ctx.Done():

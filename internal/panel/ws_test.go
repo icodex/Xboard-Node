@@ -362,3 +362,52 @@ func TestWSClient_ShutdownUnblocksWhenPeerSilent(t *testing.T) {
 		t.Fatal("Run did not return within 3s after ctx cancel (blocked on silent peer)")
 	}
 }
+
+// The client must ask for the global device snapshot right after connecting:
+// the panel only pushes sync.devices to the node that just reported, so a
+// fresh connection would otherwise hold no global state at all.
+func TestWSClient_RequestsDeviceStateOnConnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	received := make(chan string, 8)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if err := conn.WriteJSON(wsMessage{Event: "auth.success"}); err != nil {
+			return
+		}
+		for {
+			var msg wsMessage
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+			select {
+			case received <- msg.Event:
+			default:
+			}
+		}
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	ws := NewWSClient("ws://"+host, "devreq-token", 1, WSClientConfig{}, nil, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ws.Run(ctx)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-received:
+			if ev == "request.devices" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("client never sent request.devices after connect")
+		}
+	}
+}
