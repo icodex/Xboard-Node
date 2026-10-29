@@ -224,6 +224,20 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	conn.SetReadLimit(10 << 20) // 10MB max message size
 
+	// Half-open detection: without a read deadline the read loop blocks
+	// forever on a silently-dead link (NAT timeout, panel process hang).
+	// IsConnected() would stay true, the service would skip REST polling and
+	// config/user updates stall until TCP retransmission gives up (~15-30min).
+	// Standard gorilla keepalive: extend the deadline on every pong (and any
+	// message), and probe the link with control pings below.
+	const keepaliveInterval = 30 * time.Second
+	readTimeout := keepaliveInterval * 3
+	extendReadDeadline := func() {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+	}
+	extendReadDeadline()
+	conn.SetPongHandler(func(string) error { extendReadDeadline(); return nil })
+
 	// Force the read goroutine to unblock on shutdown: conn.ReadJSON has no
 	// deadline, so a peer that never answers the close frame would otherwise
 	// hold the <-done wait below indefinitely.
@@ -237,6 +251,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 	if err := conn.ReadJSON(&firstMsg); err != nil {
 		return fmt.Errorf("read auth response: %w", err)
 	}
+	extendReadDeadline()
 	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", string(firstMsg.Data))
 
 	if firstMsg.Event == "error" {
@@ -259,6 +274,12 @@ func (w *WSClient) connect(ctx context.Context) error {
 		w.connected.Store(true)
 		w.notifyStatus(true)
 	}
+
+	// Link probe: TCP-level control pings. The panel only ever sends
+	// application-level pings and never drops silent connections, so without
+	// an active probe a dead link goes unnoticed (see keepalive note above).
+	keepaliveTicker := time.NewTicker(keepaliveInterval)
+	defer keepaliveTicker.Stop()
 
 	// Ping interval: send pong responses to server pings.
 	// We also use this timer to trigger periodic status pushes.
@@ -283,6 +304,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 				}
 				return
 			}
+			extendReadDeadline()
 			nlog.Core().Debug("ws recv", "event", msg.Event, "data", string(msg.Data))
 			w.handleMessage(msg)
 			if msg.Event == "ping" {
@@ -308,6 +330,13 @@ func (w *WSClient) connect(ctx context.Context) error {
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			<-done
 			return nil
+
+		case <-keepaliveTicker.C:
+			// Active link probe: a failed write surfaces a dead connection
+			// within one interval instead of one TCP-retransmission timeout.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+				return fmt.Errorf("keepalive ping: %w", err)
+			}
 
 		case err := <-errCh:
 			return fmt.Errorf("read: %w", err)
