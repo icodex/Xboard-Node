@@ -451,31 +451,74 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		"listen_port": nc.ServerPort,
 	}
 
+	var inbound M
 	switch nc.Protocol {
 	case "shadowsocks":
-		return buildShadowsocks(base, nc, users)
+		inbound = buildShadowsocks(base, nc, users)
 	case "vmess":
-		return buildVMess(base, nc, users, tc)
+		inbound = buildVMess(base, nc, users, tc)
 	case "vless":
-		return buildVLESS(base, nc, users, tc)
+		inbound = buildVLESS(base, nc, users, tc)
 	case "trojan":
-		return buildTrojan(base, nc, users, tc)
+		inbound = buildTrojan(base, nc, users, tc)
 	case "hysteria":
-		return buildHysteria(base, nc, users, tc)
+		inbound = buildHysteria(base, nc, users, tc)
 	case "tuic":
-		return buildTUIC(base, nc, users, tc)
+		inbound = buildTUIC(base, nc, users, tc)
 	case "anytls":
-		return buildAnyTLS(base, nc, users, tc)
+		inbound = buildAnyTLS(base, nc, users, tc)
 	case "naive":
-		return buildNaive(base, nc, users, tc)
+		inbound = buildNaive(base, nc, users, tc)
 	case "socks":
-		return buildSocks(base, users, nc)
+		inbound = buildSocks(base, users, nc)
 	case "http":
-		return buildHTTP(base, nc, users, tc)
+		inbound = buildHTTP(base, nc, users, tc)
 	case "mieru":
-		return buildMieru(base, nc, users)
+		inbound = buildMieru(base, nc, users)
 	default:
 		return nil
+	}
+	if inbound == nil {
+		return nil
+	}
+	applyGenericPolicy(inbound, nc)
+	return inbound
+}
+
+// applyGenericPolicy maps the panel's protocol-agnostic policy payload onto
+// sing-box ListenOptions, which every inbound embeds: sniff trio + udp_timeout
+// for all protocols, and the QUIC subset for the QUIC-based protocols.
+func applyGenericPolicy(base M, nc *model.NodeSpec) {
+	if nc.Sniff != nil {
+		if nc.Sniff.Enable {
+			base["sniff"] = true
+		}
+		if nc.Sniff.RewriteDomain {
+			base["sniff_override_destination"] = true
+		}
+		if nc.Sniff.Timeout > 0 {
+			// badoption.Duration unmarshals bare JSON numbers as seconds
+			base["sniff_timeout"] = nc.Sniff.Timeout
+		}
+		if nc.Sniff.TCPPorts != "" || nc.Sniff.UDPPorts != "" {
+			nlog.Core().Warn("sing-box inbound sniffing has no port filter (tcpPorts/udpPorts), sniffing applies to all traffic", "protocol", nc.Protocol)
+		}
+	}
+
+	if nc.UDPIdleTimeout > 0 {
+		// UDPTimeoutCompat unmarshals bare JSON numbers as seconds
+		base["udp_timeout"] = nc.UDPIdleTimeout
+	}
+
+	if nc.Quic != nil && (nc.Protocol == "hysteria" || nc.Protocol == "tuic") {
+		if nc.Quic.DisablePathMTUDiscovery {
+			base["disable_path_mtu_discovery"] = true
+		}
+		if nc.Quic.InitStreamReceiveWindow != 0 || nc.Quic.MaxStreamReceiveWindow != 0 ||
+			nc.Quic.InitConnReceiveWindow != 0 || nc.Quic.MaxConnReceiveWindow != 0 ||
+			nc.Quic.MaxIdleTimeout != 0 || nc.Quic.MaxIncomingStreams != 0 || nc.Quic.DisableStatelessReset {
+			nlog.Core().Warn("sing-box does not expose QUIC window/timeout/stream tuning from the panel, ignoring (only disablePathMTUDiscovery applies)", "protocol", nc.Protocol)
+		}
 	}
 }
 
@@ -684,6 +727,7 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 				"password": nc.ObfsPassword,
 			}
 		}
+		applyProxyProtocol(base, nc)
 		applyHysteriaPolicy(base, nc)
 	} else {
 		base["type"] = "hysteria"
@@ -744,38 +788,6 @@ func applyHysteriaPolicy(base M, nc *model.NodeSpec) {
 		if m := buildMasquerade(nc.Masquerade); m != nil {
 			base["masquerade"] = m
 		}
-	}
-
-	if nc.Quic != nil {
-		if nc.Quic.DisablePathMTUDiscovery {
-			base["disable_path_mtu_discovery"] = true
-		}
-		if nc.Quic.InitStreamReceiveWindow != 0 || nc.Quic.MaxStreamReceiveWindow != 0 ||
-			nc.Quic.InitConnReceiveWindow != 0 || nc.Quic.MaxConnReceiveWindow != 0 ||
-			nc.Quic.MaxIdleTimeout != 0 || nc.Quic.MaxIncomingStreams != 0 || nc.Quic.DisableStatelessReset {
-			nlog.Core().Warn("sing-box hysteria2 does not expose QUIC window/timeout/stream tuning from the panel, ignoring (only disablePathMTUDiscovery applies)")
-		}
-	}
-
-	if nc.Sniff != nil {
-		if nc.Sniff.Enable {
-			base["sniff"] = true
-		}
-		if nc.Sniff.RewriteDomain {
-			base["sniff_override_destination"] = true
-		}
-		if nc.Sniff.Timeout > 0 {
-			// badoption.Duration unmarshals bare JSON numbers as seconds
-			base["sniff_timeout"] = nc.Sniff.Timeout
-		}
-		if nc.Sniff.TCPPorts != "" || nc.Sniff.UDPPorts != "" {
-			nlog.Core().Warn("sing-box inbound sniffing has no port filter (tcpPorts/udpPorts), sniffing applies to all traffic", "protocol", nc.Protocol)
-		}
-	}
-
-	if nc.UDPIdleTimeout > 0 {
-		// UDPTimeoutCompat unmarshals bare JSON numbers as seconds
-		base["udp_timeout"] = nc.UDPIdleTimeout
 	}
 
 	if len(nc.Resolver) > 0 {
@@ -1135,6 +1147,12 @@ func buildRealityConfig(nc *model.NodeSpec) M {
 func applyMultiplex(base M, nc *model.NodeSpec) {
 	if nc.Multiplex == nil || !nc.Multiplex.Enabled {
 		return
+	}
+
+	// sing-box inbound multiplex is enabled/padding/brutal only; protocol and
+	// the connection/stream knobs exist on the outbound side alone.
+	if nc.Multiplex.Protocol != "" || nc.Multiplex.MaxConnections != 0 || nc.Multiplex.MinStreams != 0 || nc.Multiplex.MaxStreams != 0 {
+		nlog.Core().Warn("sing-box inbound multiplex ignores protocol/max_connections/min_streams/max_streams (outbound-only options)", "protocol", nc.Protocol)
 	}
 
 	mux := M{

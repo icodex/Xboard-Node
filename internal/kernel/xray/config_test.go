@@ -845,3 +845,105 @@ func TestBuildConfig_Shadowsocks2022ChachaRejected(t *testing.T) {
 		t.Fatalf("chacha20-poly1305 multi-user inbound must be rejected, got %+v", inbound)
 	}
 }
+
+// --- generic policy wiring ---
+
+func TestBuildInbound_ListenWildcardDualStack(t *testing.T) {
+	for _, ip := range []string{"", "0.0.0.0", "::"} {
+		nc := &panel.NodeConfig{Protocol: "vmess", ServerPort: 443, ListenIP: ip}
+		inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+		if inbound["listen"] != "::" {
+			t.Errorf("listen_ip %q should map to dual-stack ::, got %v", ip, inbound["listen"])
+		}
+	}
+	nc := &panel.NodeConfig{Protocol: "vmess", ServerPort: 443, ListenIP: "192.0.2.10"}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if inbound["listen"] != "192.0.2.10" {
+		t.Errorf("concrete listen_ip should be honored, got %v", inbound["listen"])
+	}
+}
+
+func TestBuildInbound_Sniffing(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 443,
+		Sniff:      &panel.SniffConfig{Enable: true, RewriteDomain: true},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	sniffing := inbound["sniffing"].(M)
+	if sniffing["enabled"] != true {
+		t.Error("sniffing.enabled should be true")
+	}
+	override := sniffing["destOverride"].([]string)
+	if len(override) != 3 {
+		t.Errorf("rewriteDomain should set destOverride http/tls/quic, got %v", override)
+	}
+
+	// sniff disabled or absent -> no sniffing key at all
+	plain := buildInbound(testNodeSpec(&panel.NodeConfig{Protocol: "vmess", ServerPort: 443}), testUsers, kernel.TLSCert{})
+	if _, ok := plain["sniffing"]; ok {
+		t.Error("sniff disabled must not set sniffing")
+	}
+}
+
+func TestBuildInbound_WS_EarlyData(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "vmess",
+		ServerPort: 443,
+		Network:    "ws",
+		NetworkSettings: map[string]any{
+			"path":                   "/ws",
+			"max_early_data":         2048,
+			"early_data_header_name": "Sec-WebSocket-Protocol",
+		},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	ss := inbound["streamSettings"].(M)
+	ws := ss["wsSettings"].(M)
+	if ws["maxEarlyData"] != 2048 {
+		t.Errorf("maxEarlyData should map from max_early_data, got %v", ws["maxEarlyData"])
+	}
+	if ws["earlyDataHeaderName"] != "Sec-WebSocket-Protocol" {
+		t.Errorf("earlyDataHeaderName should map from early_data_header_name, got %v", ws["earlyDataHeaderName"])
+	}
+}
+
+func TestBuildInbound_HTTP_PlaintextProxyProtocol(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:            "http",
+		ServerPort:          8080,
+		TLS:                 0,
+		AcceptProxyProtocol: true,
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	ss := inbound["streamSettings"].(M)
+	sockopt := ss["sockopt"].(M)
+	if sockopt["acceptProxyProtocol"] != true {
+		t.Error("plaintext http + accept_proxy_protocol must set sockopt.acceptProxyProtocol")
+	}
+}
+
+func TestBuildInbound_Hysteria2_ALPNOverride(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:    "hysteria",
+		ServerPort:  8443,
+		Version:     2,
+		TLSSettings: map[string]any{"alpn": []any{"h3"}},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("C"), KeyPEM: []byte("K")})
+	ss := inbound["streamSettings"].(M)
+	tls := ss["tlsSettings"].(M)
+	got := tls["alpn"].([]string)
+	if len(got) != 1 || got[0] != "h3" {
+		t.Errorf("panel alpn h3 should pass through, got %v", got)
+	}
+
+	nc.TLSSettings = nil
+	inbound = buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("C"), KeyPEM: []byte("K")})
+	ss = inbound["streamSettings"].(M)
+	tls = ss["tlsSettings"].(M)
+	got = tls["alpn"].([]string)
+	if len(got) != 1 || got[0] != "h3" {
+		t.Errorf("missing alpn should default to h3, got %v", got)
+	}
+}

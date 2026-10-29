@@ -1102,3 +1102,63 @@ func TestBuildInbound_ListenIP(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildInbound_GenericPolicy_AcrossProtocols(t *testing.T) {
+	policy := &panel.SniffConfig{Enable: true, Timeout: 3, RewriteDomain: true}
+	for _, proto := range []string{"shadowsocks", "vmess", "vless", "trojan", "tuic", "anytls", "socks", "http", "mieru", "naive", "hysteria"} {
+		nc := &panel.NodeConfig{
+			Protocol:       proto,
+			ServerPort:     443,
+			Sniff:          policy,
+			UDPIdleTimeout: 90,
+		}
+		if proto == "hysteria" {
+			nc.Version = 2
+		}
+		inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("C"), KeyPEM: []byte("K")})
+		if inbound == nil {
+			t.Fatalf("%s: inbound unexpectedly nil", proto)
+		}
+		if inbound["sniff"] != true {
+			t.Errorf("%s: sniff should map for every protocol", proto)
+		}
+		if inbound["sniff_override_destination"] != true {
+			t.Errorf("%s: sniff_override_destination should map", proto)
+		}
+		if inbound["sniff_timeout"] != 3 {
+			t.Errorf("%s: sniff_timeout should map (seconds), got %v", proto, inbound["sniff_timeout"])
+		}
+		if inbound["udp_timeout"] != 90 {
+			t.Errorf("%s: udp_timeout should map (seconds), got %v", proto, inbound["udp_timeout"])
+		}
+	}
+}
+
+func TestBuildInbound_TUIC_QuicMTUD(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "tuic",
+		ServerPort: 443,
+		Quic:       &panel.QuicConfig{DisablePathMTUDiscovery: true, MaxIncomingStreams: 100},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("C"), KeyPEM: []byte("K")})
+	if inbound["disable_path_mtu_discovery"] != true {
+		t.Error("tuic quic.disablePathMTUDiscovery should map")
+	}
+	// window/streams tuning is not expressible: must not land in the inbound
+	if _, ok := inbound["max_incoming_streams"]; ok {
+		t.Error("quic stream tuning must not land in sing-box inbound")
+	}
+}
+
+func TestBuildInbound_QuicIgnoredOnNonQUICProtocols(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 443,
+		Network:    "tcp",
+		Quic:       &panel.QuicConfig{DisablePathMTUDiscovery: true},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("C"), KeyPEM: []byte("K")})
+	if _, ok := inbound["disable_path_mtu_discovery"]; ok {
+		t.Error("quic options must not apply to non-QUIC protocols")
+	}
+}

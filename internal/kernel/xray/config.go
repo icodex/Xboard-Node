@@ -219,8 +219,13 @@ func xrayErrorPath(output string) string {
 }
 
 func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	// Dual-stack wildcard by default, mirroring the sing-box builder: the
+	// panel sends listen_ip 0.0.0.0 today, which must NOT downgrade the
+	// listener to v4-only.
 	listenAddr := "::"
-	if nc.ListenIP != "" {
+	switch nc.ListenIP {
+	case "", "0.0.0.0", "::":
+	default:
 		listenAddr = nc.ListenIP
 	}
 	base := M{
@@ -235,23 +240,48 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		},
 	}
 
+	var inbound M
 	switch nc.Protocol {
 	case "vmess":
-		return buildVMess(base, nc, users, tc)
+		inbound = buildVMess(base, nc, users, tc)
 	case "vless":
-		return buildVLESS(base, nc, users, tc)
+		inbound = buildVLESS(base, nc, users, tc)
 	case "trojan":
-		return buildTrojan(base, nc, users, tc)
+		inbound = buildTrojan(base, nc, users, tc)
 	case "shadowsocks":
-		return buildShadowsocks(base, nc, users)
+		inbound = buildShadowsocks(base, nc, users)
 	case "socks":
-		return buildSocks(base, users)
+		inbound = buildSocks(base, users)
 	case "http":
-		return buildHTTP(base, nc, users, tc)
+		inbound = buildHTTP(base, nc, users, tc)
 	case "hysteria":
-		return buildHysteria(base, nc, users, tc)
+		inbound = buildHysteria(base, nc, users, tc)
 	default:
 		return nil
+	}
+	if inbound == nil {
+		return nil
+	}
+	applyXrayPolicy(inbound, nc)
+	return inbound
+}
+
+// applyXrayPolicy maps protocol-agnostic panel policy onto xray inbound
+// options: sniffing for every protocol, plus the multiplex dropped-field
+// notice (xray inbounds have no mux concept).
+func applyXrayPolicy(base M, nc *model.NodeSpec) {
+	if nc.Sniff != nil && nc.Sniff.Enable {
+		sniffing := M{"enabled": true}
+		if nc.Sniff.RewriteDomain {
+			// rewriteDomain semantics: route by sniffed domain instead of the
+			// dialed address -> destOverride hands the target to routing.
+			sniffing["destOverride"] = []string{"http", "tls", "quic"}
+		}
+		base["sniffing"] = sniffing
+	}
+
+	if nc.Multiplex != nil && nc.Multiplex.Enabled {
+		nlog.Core().Warn("xray inbound has no multiplex support (panel multiplex is a sing-box-only feature), ignoring", "protocol", nc.Protocol)
 	}
 }
 
@@ -427,6 +457,11 @@ func buildHTTP(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLS
 
 	if nc.TLS == 1 {
 		applyStreamSettings(base, nc, tc)
+	} else if nc.GetProxyProtocol() {
+		// Plaintext HTTP never enters applyStreamSettings (that path owns the
+		// sockopt); acceptProxyProtocol would be silently dropped without this.
+		ss := M{"sockopt": M{"acceptProxyProtocol": true}}
+		base["streamSettings"] = ss
 	}
 	return base
 }
@@ -486,9 +521,16 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 			"certificate": []string{string(tc.CertPEM)},
 			"key":         []string{string(tc.KeyPEM)},
 		}
+		// QUIC requires ALPN; honor the panel's tls_settings.alpn, fall back to h3.
+		alpn := []string{"h3"}
+		if nc.TLSSettings != nil {
+			if v, ok := nc.TLSSettings["alpn"]; ok && v != nil {
+				alpn = normalizeALPNList(v)
+			}
+		}
 		ss["tlsSettings"] = M{
 			"certificates": []M{tlsCert},
-			"alpn":         []string{"h3"},
+			"alpn":         alpn,
 		}
 	} else {
 		nlog.Core().Warn("hysteria requires TLS certificate files; configure cert_mode (self, file, http, dns, or content)")
@@ -532,6 +574,14 @@ func applyStreamSettings(base M, nc *model.NodeSpec, tc kernel.TLSCert) {
 			}
 			if len(headers) > 0 {
 				wsSettings["headers"] = headers
+			}
+			// 0-RTT passthrough, mirroring the sing-box builder (xray spells
+			// them maxEarlyData / earlyDataHeaderName).
+			if v, ok := nc.NetworkSettings["max_early_data"]; ok {
+				wsSettings["maxEarlyData"] = v
+			}
+			if v, ok := nc.NetworkSettings["early_data_header_name"]; ok {
+				wsSettings["earlyDataHeaderName"] = v
 			}
 		}
 		ss["wsSettings"] = wsSettings
@@ -951,6 +1001,28 @@ func extractECHServerKeys(tlsSettings map[string]interface{}) string {
 	}
 
 	return echPEMToBase64(pemData)
+}
+
+// normalizeALPNList coerces the panel's tls_settings.alpn (a PHP array decodes
+// as []any) into []string; anything unusable falls back to the QUIC default.
+func normalizeALPNList(v any) []string {
+	switch list := v.(type) {
+	case []string:
+		if len(list) > 0 {
+			return list
+		}
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return []string{"h3"}
 }
 
 // echPEMToBase64 parses an "ECH KEYS" PEM block and returns base64 of the raw bytes.
