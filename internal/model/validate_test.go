@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/panel"
 )
 
 func TestValidateTransportKernel(t *testing.T) {
@@ -138,6 +139,47 @@ func TestValidateNodeSpec_SSPluginRejected(t *testing.T) {
 	}
 	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "singbox"}); err != nil {
 		t.Errorf("no plugin: unexpected error %v", err)
+	}
+}
+
+func TestValidateNodeSpec_HysteriaPolicy(t *testing.T) {
+	base := &NodeSpec{Protocol: "hysteria", Version: 2}
+
+	for _, profile := range []string{"standard", "conservative", "aggressive", ""} {
+		spec := *base
+		spec.HysteriaCongestion = &panel.CongestionConfig{Type: "bbr", BBRProfile: profile}
+		if err := ValidateNodeSpec(&spec, config.KernelConfig{Type: "singbox"}); err != nil {
+			t.Errorf("bbr_profile %q: unexpected error %v", profile, err)
+		}
+	}
+	for _, profile := range []string{"high", "low", "turbo"} {
+		spec := *base
+		spec.HysteriaCongestion = &panel.CongestionConfig{BBRProfile: profile}
+		err := ValidateNodeSpec(&spec, config.KernelConfig{Type: "singbox"})
+		if err == nil || !contains(err.Error(), "bbr_profile") {
+			t.Errorf("bbr_profile %q: want bbr_profile rejection, got %v", profile, err)
+		}
+	}
+	spec := *base
+	spec.HysteriaCongestion = &panel.CongestionConfig{Type: "cubic"}
+	if err := ValidateNodeSpec(&spec, config.KernelConfig{Type: "singbox"}); err == nil || !contains(err.Error(), "congestion.type") {
+		t.Errorf("congestion.type cubic: want rejection, got %v", err)
+	}
+
+	for _, timeout := range []int{1, 60, 600} {
+		spec := *base
+		spec.UDPIdleTimeout = timeout
+		if err := ValidateNodeSpec(&spec, config.KernelConfig{Type: "singbox"}); err != nil {
+			t.Errorf("udp_idle_timeout %d: unexpected error %v", timeout, err)
+		}
+	}
+	for _, timeout := range []int{-1, 601} {
+		spec := *base
+		spec.UDPIdleTimeout = timeout
+		err := ValidateNodeSpec(&spec, config.KernelConfig{Type: "singbox"})
+		if err == nil || !contains(err.Error(), "udp_idle_timeout") {
+			t.Errorf("udp_idle_timeout %d: want rejection, got %v", timeout, err)
+		}
 	}
 }
 

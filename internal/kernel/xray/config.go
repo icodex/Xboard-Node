@@ -452,6 +452,13 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 		nlog.Core().Warn("xray hysteria does not support obfs, ignoring", "obfs", nc.Obfs)
 	}
 
+	// Panel hysteria policy fields have no xray hysteria equivalent.
+	if nc.Sniff != nil || nc.Masquerade != nil || nc.Quic != nil || nc.HysteriaCongestion != nil ||
+		len(nc.Resolver) > 0 || nc.DisableUDP || nc.UDPIdleTimeout > 0 ||
+		nc.IgnoreClientBandwidth || nc.DisableLossCompensation {
+		nlog.Core().Warn("xray hysteria does not support panel policy fields (sniff/masquerade/quic/congestion/resolver/switches), ignoring; use the singbox kernel or the hysteria backend for these")
+	}
+
 	ss := M{
 		"network": "hysteria",
 		"hysteriaSettings": M{

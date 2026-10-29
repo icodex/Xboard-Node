@@ -71,8 +71,8 @@ type MachineNode struct {
 
 // MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
 type MachineNodesResponse struct {
-	Nodes      []MachineNode      `json:"nodes"`
-	BaseConfig MachineBaseConfig  `json:"base_config"`
+	Nodes      []MachineNode     `json:"nodes"`
+	BaseConfig MachineBaseConfig `json:"base_config"`
 }
 
 // MachineBaseConfig holds polling intervals for machine mode.
@@ -128,6 +128,18 @@ type NodeConfig struct {
 	Obfs         string `json:"obfs,omitempty"`
 	ObfsPassword string `json:"obfs-password,omitempty"`
 
+	// Hysteria policy (Xboard hysteria panelization; sub-keys stay camelCase
+	// to mirror the panel's protocol_settings shape)
+	Sniff                   *SniffConfig      `json:"sniff,omitempty"`
+	Masquerade              *MasqueradeConfig `json:"masquerade,omitempty"`
+	Quic                    *QuicConfig       `json:"quic,omitempty"`
+	HysteriaCongestion      *CongestionConfig `json:"congestion,omitempty"`
+	Resolver                map[string]any    `json:"resolver,omitempty"`
+	DisableUDP              bool              `json:"disable_udp,omitempty"`
+	UDPIdleTimeout          int               `json:"udp_idle_timeout,omitempty"` // seconds
+	IgnoreClientBandwidth   bool              `json:"ignore_client_bandwidth,omitempty"`
+	DisableLossCompensation bool              `json:"disable_loss_compensation,omitempty"`
+
 	// TUIC
 	CongestionControl string `json:"congestion_control,omitempty"`
 
@@ -159,6 +171,62 @@ func (nc *NodeConfig) GetProxyProtocol() bool {
 		}
 	}
 	return false
+}
+
+// SniffConfig mirrors the panel's protocol_settings.sniff object.
+type SniffConfig struct {
+	Enable        bool   `json:"enable,omitempty"`
+	Timeout       int    `json:"timeout,omitempty"` // seconds
+	RewriteDomain bool   `json:"rewriteDomain,omitempty"`
+	TCPPorts      string `json:"tcpPorts,omitempty"`
+	UDPPorts      string `json:"udpPorts,omitempty"`
+}
+
+// MasqueradeConfig mirrors the panel's protocol_settings.masquerade object.
+type MasqueradeConfig struct {
+	Type         string                  `json:"type,omitempty"` // 404, file, proxy, string
+	ListenHTTP   string                  `json:"listenHTTP,omitempty"`
+	ListenHTTPS  string                  `json:"listenHTTPS,omitempty"`
+	ForceHTTPS   bool                    `json:"forceHTTPS,omitempty"`
+	File         *MasqueradeFileConfig   `json:"file,omitempty"`
+	Proxy        *MasqueradeProxyConfig  `json:"proxy,omitempty"`
+	StringConfig *MasqueradeStringConfig `json:"string,omitempty"`
+}
+
+type MasqueradeFileConfig struct {
+	Dir string `json:"dir,omitempty"`
+}
+
+type MasqueradeProxyConfig struct {
+	URL         string `json:"url,omitempty"`
+	RewriteHost bool   `json:"rewriteHost,omitempty"`
+	XForwarded  bool   `json:"xForwarded,omitempty"`
+	Insecure    bool   `json:"insecure,omitempty"`
+}
+
+type MasqueradeStringConfig struct {
+	Content    string `json:"content,omitempty"`
+	StatusCode int    `json:"statusCode,omitempty"`
+}
+
+// QuicConfig mirrors the panel's protocol_settings.quic object.
+type QuicConfig struct {
+	InitStreamReceiveWindow int64 `json:"initStreamReceiveWindow,omitempty"`
+	MaxStreamReceiveWindow  int64 `json:"maxStreamReceiveWindow,omitempty"`
+	InitConnReceiveWindow   int64 `json:"initConnReceiveWindow,omitempty"`
+	MaxConnReceiveWindow    int64 `json:"maxConnReceiveWindow,omitempty"`
+	MaxIdleTimeout          int   `json:"maxIdleTimeout,omitempty"` // seconds
+	MaxIncomingStreams      int64 `json:"maxIncomingStreams,omitempty"`
+	DisablePathMTUDiscovery bool  `json:"disablePathMTUDiscovery,omitempty"`
+	DisableStatelessReset   bool  `json:"disableStatelessReset,omitempty"`
+}
+
+// CongestionConfig mirrors the panel's protocol_settings.congestion object.
+// BBRProfile enum matches both sing-box fork and hysteria core: standard,
+// conservative, aggressive.
+type CongestionConfig struct {
+	Type       string `json:"type,omitempty"` // bbr, reno
+	BBRProfile string `json:"bbrProfile,omitempty"`
 }
 
 type MultiplexConfig struct {

@@ -36,6 +36,10 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return fmt.Errorf("shadowsocks plugin %q is not supported: neither kernel implements SIP003 plugins; disable the plugin on the panel", n.Plugin)
 	}
 
+	if err := validateHysteriaPolicy(n); err != nil {
+		return err
+	}
+
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)
 	if err != nil {
 		return fmt.Errorf("collect additional outbound tags: %w", err)
@@ -182,4 +186,32 @@ func buildAvailableOutboundTags(structured []OutboundConfig, rawTags []string) m
 		}
 	}
 	return available
+}
+
+// hysteriaBBRProfiles matches both the sing-box fork enum and hysteria core
+// ParseProfile: standard, conservative, aggressive.
+var hysteriaBBRProfiles = map[string]bool{
+	"standard":     true,
+	"conservative": true,
+	"aggressive":   true,
+}
+
+// validateHysteriaPolicy checks the panel-policy fields every backend would
+// otherwise only reject at config-parse time.
+func validateHysteriaPolicy(n *NodeSpec) error {
+	if n.Protocol != "hysteria" {
+		return nil
+	}
+	if n.HysteriaCongestion != nil {
+		if p := strings.TrimSpace(n.HysteriaCongestion.BBRProfile); p != "" && !hysteriaBBRProfiles[strings.ToLower(p)] {
+			return fmt.Errorf("hysteria congestion.bbr_profile %q is invalid: use standard, conservative or aggressive", p)
+		}
+		if t := strings.ToLower(strings.TrimSpace(n.HysteriaCongestion.Type)); t != "" && t != "bbr" && t != "reno" {
+			return fmt.Errorf("hysteria congestion.type %q is invalid: use bbr or reno", n.HysteriaCongestion.Type)
+		}
+	}
+	if n.UDPIdleTimeout != 0 && (n.UDPIdleTimeout < 1 || n.UDPIdleTimeout > 600) {
+		return fmt.Errorf("hysteria udp_idle_timeout %d out of range: use 1-600 seconds", n.UDPIdleTimeout)
+	}
+	return nil
 }

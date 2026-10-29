@@ -1,6 +1,9 @@
 package model
 
-import "github.com/cedar2025/xboard-node/internal/config"
+import (
+	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/panel"
+)
 
 type NodeSpec struct {
 	Protocol        string
@@ -37,6 +40,17 @@ type NodeSpec struct {
 	DownMbps     int
 	Obfs         string
 	ObfsPassword string
+
+	// Hysteria policy (Xboard hysteria panelization)
+	Sniff                   *panel.SniffConfig
+	Masquerade              *panel.MasqueradeConfig
+	Quic                    *panel.QuicConfig
+	HysteriaCongestion      *panel.CongestionConfig
+	Resolver                map[string]any
+	DisableUDP              bool
+	UDPIdleTimeout          int
+	IgnoreClientBandwidth   bool
+	DisableLossCompensation bool
 
 	CongestionControl string
 	PaddingScheme     string

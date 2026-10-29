@@ -12,6 +12,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/panel"
 	"github.com/go-viper/mapstructure/v2"
 )
 
@@ -683,6 +684,7 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 				"password": nc.ObfsPassword,
 			}
 		}
+		applyHysteriaPolicy(base, nc)
 	} else {
 		base["type"] = "hysteria"
 
@@ -717,6 +719,109 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 	}
 	base["tls"] = tls
 	return base
+}
+
+// applyHysteriaPolicy maps the panel's hysteria policy payload onto the
+// sing-box hysteria2 inbound. Everything sing-box cannot express is surfaced
+// as a dropped-field warning, mirroring vmess+Reality / proxy protocol.
+func applyHysteriaPolicy(base M, nc *model.NodeSpec) {
+	if nc.IgnoreClientBandwidth {
+		base["ignore_client_bandwidth"] = true
+	}
+
+	if nc.HysteriaCongestion != nil {
+		if p := strings.TrimSpace(nc.HysteriaCongestion.BBRProfile); p != "" {
+			base["bbr_profile"] = strings.ToLower(p)
+		}
+		if t := strings.ToLower(strings.TrimSpace(nc.HysteriaCongestion.Type)); t != "" && t != "bbr" {
+			// sing-box's hysteria2 congestion is BBR(+Brutal) only; the panel's
+			// congestion.type switch has no per-inbound equivalent here.
+			nlog.Core().Warn("sing-box hysteria2 does not support congestion.type switching (always BBR), ignoring", "type", nc.HysteriaCongestion.Type)
+		}
+	}
+
+	if nc.Masquerade != nil {
+		if m := buildMasquerade(nc.Masquerade); m != nil {
+			base["masquerade"] = m
+		}
+	}
+
+	if nc.Quic != nil {
+		if nc.Quic.DisablePathMTUDiscovery {
+			base["disable_path_mtu_discovery"] = true
+		}
+		if nc.Quic.InitStreamReceiveWindow != 0 || nc.Quic.MaxStreamReceiveWindow != 0 ||
+			nc.Quic.InitConnReceiveWindow != 0 || nc.Quic.MaxConnReceiveWindow != 0 ||
+			nc.Quic.MaxIdleTimeout != 0 || nc.Quic.MaxIncomingStreams != 0 || nc.Quic.DisableStatelessReset {
+			nlog.Core().Warn("sing-box hysteria2 does not expose QUIC window/timeout/stream tuning from the panel, ignoring (only disablePathMTUDiscovery applies)")
+		}
+	}
+
+	if nc.Sniff != nil {
+		if nc.Sniff.Enable {
+			base["sniff"] = true
+		}
+		if nc.Sniff.RewriteDomain {
+			base["sniff_override_destination"] = true
+		}
+		if nc.Sniff.Timeout > 0 {
+			// badoption.Duration unmarshals bare JSON numbers as seconds
+			base["sniff_timeout"] = nc.Sniff.Timeout
+		}
+		if nc.Sniff.TCPPorts != "" || nc.Sniff.UDPPorts != "" {
+			nlog.Core().Warn("sing-box inbound sniffing has no port filter (tcpPorts/udpPorts), sniffing applies to all traffic", "protocol", nc.Protocol)
+		}
+	}
+
+	if nc.UDPIdleTimeout > 0 {
+		// UDPTimeoutCompat unmarshals bare JSON numbers as seconds
+		base["udp_timeout"] = nc.UDPIdleTimeout
+	}
+
+	if len(nc.Resolver) > 0 {
+		nlog.Core().Warn("sing-box does not support per-node resolver from the panel (dns is a global config), ignoring")
+	}
+	if nc.DisableLossCompensation {
+		nlog.Core().Warn("sing-box does not support disable_loss_compensation on hysteria2, ignoring")
+	}
+	if nc.DisableUDP {
+		nlog.Core().Warn("sing-box does not support disable_udp on a single inbound, ignoring; use a route rule if needed")
+	}
+}
+
+// buildMasquerade translates the panel masquerade object into the sing-box
+// hysteria2 masquerade option. Type "404" means default behavior: no
+// masquerade key at all.
+func buildMasquerade(mc *panel.MasqueradeConfig) M {
+	switch strings.ToLower(strings.TrimSpace(mc.Type)) {
+	case "", "404":
+		return nil
+	case "file":
+		if mc.File == nil || strings.TrimSpace(mc.File.Dir) == "" {
+			nlog.Core().Warn("masquerade type file requires file.dir, dropping masquerade")
+			return nil
+		}
+		return M{"type": "file", "file": M{"directory": mc.File.Dir}}
+	case "proxy":
+		if mc.Proxy == nil || strings.TrimSpace(mc.Proxy.URL) == "" {
+			nlog.Core().Warn("masquerade type proxy requires proxy.url, dropping masquerade")
+			return nil
+		}
+		return M{"type": "proxy", "proxy": M{"url": mc.Proxy.URL, "rewrite_host": mc.Proxy.RewriteHost}}
+	case "string":
+		if mc.StringConfig == nil || strings.TrimSpace(mc.StringConfig.Content) == "" {
+			nlog.Core().Warn("masquerade type string requires string.content, dropping masquerade")
+			return nil
+		}
+		s := M{"content": mc.StringConfig.Content}
+		if mc.StringConfig.StatusCode != 0 {
+			s["status_code"] = mc.StringConfig.StatusCode
+		}
+		return M{"type": "string", "string": s}
+	default:
+		nlog.Core().Warn("masquerade type not supported by sing-box kernel, dropping", "type", mc.Type)
+		return nil
+	}
 }
 
 func buildTUIC(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {

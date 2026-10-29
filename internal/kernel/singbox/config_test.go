@@ -369,6 +369,99 @@ func TestBuildInbound_Hysteria1(t *testing.T) {
 	assertMapValue(t, users[0], "auth_str", "aaaaaaaa-1111-2222-3333-444444444444")
 }
 
+func TestBuildInbound_Hysteria2_Policy(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "hysteria",
+		ServerPort: 444,
+		Version:    2,
+		Sniff: &panel.SniffConfig{
+			Enable:        true,
+			Timeout:       5,
+			RewriteDomain: true,
+		},
+		Masquerade: &panel.MasqueradeConfig{
+			Type: "proxy",
+			Proxy: &panel.MasqueradeProxyConfig{
+				URL:         "https://example.com",
+				RewriteHost: true,
+			},
+		},
+		Quic: &panel.QuicConfig{
+			InitStreamReceiveWindow: 8388608,
+			DisablePathMTUDiscovery: true,
+		},
+		HysteriaCongestion:      &panel.CongestionConfig{Type: "bbr", BBRProfile: "aggressive"},
+		DisableUDP:              true,
+		UDPIdleTimeout:          120,
+		IgnoreClientBandwidth:   true,
+		DisableLossCompensation: true,
+		Resolver:                map[string]any{"type": "https"},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+
+	assertMapValue(t, inbound, "ignore_client_bandwidth", true)
+	assertMapValue(t, inbound, "bbr_profile", "aggressive")
+	assertMapValue(t, inbound, "sniff", true)
+	assertMapValue(t, inbound, "sniff_override_destination", true)
+	assertMapValue(t, inbound, "sniff_timeout", 5)
+	assertMapValue(t, inbound, "udp_timeout", 120)
+	assertMapValue(t, inbound, "disable_path_mtu_discovery", true)
+
+	masq := inbound["masquerade"].(M)
+	assertMapValue(t, masq, "type", "proxy")
+	proxy := masq["proxy"].(M)
+	assertMapValue(t, proxy, "url", "https://example.com")
+	assertMapValue(t, proxy, "rewrite_host", true)
+
+	// Not expressible on sing-box: never land in the inbound map.
+	for _, dropped := range []string{"resolver", "disable_udp", "disable_loss_compensation"} {
+		if _, ok := inbound[dropped]; ok {
+			t.Errorf("policy key %q should not be mapped into sing-box inbound", dropped)
+		}
+	}
+}
+
+func TestBuildInbound_Hysteria2_MasqueradeVariants(t *testing.T) {
+	base := panel.NodeConfig{Protocol: "hysteria", ServerPort: 444, Version: 2}
+
+	nc404 := base
+	nc404.Masquerade = &panel.MasqueradeConfig{Type: "404"}
+	inbound := buildInbound(testNodeSpec(&nc404), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	if _, ok := inbound["masquerade"]; ok {
+		t.Error("masquerade type 404 should not set a masquerade option")
+	}
+
+	ncFile := base
+	ncFile.Masquerade = &panel.MasqueradeConfig{
+		Type: "file",
+		File: &panel.MasqueradeFileConfig{Dir: "/var/www"},
+	}
+	inbound = buildInbound(testNodeSpec(&ncFile), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	masq := inbound["masquerade"].(M)
+	assertMapValue(t, masq, "type", "file")
+	file := masq["file"].(M)
+	assertMapValue(t, file, "directory", "/var/www")
+
+	ncString := base
+	ncString.Masquerade = &panel.MasqueradeConfig{
+		Type:         "string",
+		StringConfig: &panel.MasqueradeStringConfig{Content: "hello", StatusCode: 200},
+	}
+	inbound = buildInbound(testNodeSpec(&ncString), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	masq = inbound["masquerade"].(M)
+	assertMapValue(t, masq, "type", "string")
+	s := masq["string"].(M)
+	assertMapValue(t, s, "content", "hello")
+	assertMapValue(t, s, "status_code", 200)
+
+	ncMissing := base
+	ncMissing.Masquerade = &panel.MasqueradeConfig{Type: "file"}
+	inbound = buildInbound(testNodeSpec(&ncMissing), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	if _, ok := inbound["masquerade"]; ok {
+		t.Error("masquerade file without dir should be dropped")
+	}
+}
+
 // --- TUIC ---
 
 func TestBuildInbound_TUIC(t *testing.T) {
