@@ -172,7 +172,7 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/stun/v3 v3.1.7 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
-	github.com/pires/go-proxyproto v0.15.0 // indirect
+	github.com/pires/go-proxyproto v0.16.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/sftp v1.13.10 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
@@ -254,7 +254,7 @@ require (
 	github.com/vultr/govultr/v3 v3.20.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/xtls/reality v0.0.0-20261014101318-83f621788ca8 // indirect
+	github.com/xtls/reality v0.0.0-20261030203531-a32241e97a03 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
@@ -293,6 +293,8 @@ require (
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
 
-replace github.com/sagernet/sing-box => github.com/icodex/sing-box v1.13.2-0.20260901070914-1facf0da4a63
+replace github.com/xtls/reality => github.com/icodex/reality v0.0.0-20261030203531-a32241e97a03
 
-replace github.com/xtls/xray-core => github.com/icodex/Xray-core v0.0.0-20261026103907-3cc2e190afb9
+replace github.com/xtls/xray-core => github.com/icodex/Xray-core v0.0.0-20261030205927-7b202337d0c5
+
+replace github.com/sagernet/sing-box => github.com/icodex/sing-box v1.13.2-0.20260901070914-1facf0da4a63
