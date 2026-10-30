@@ -904,6 +904,12 @@ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
 
 	if nc.TLS == 1 {
 		if tls := buildTLSConfig(nc, tc); tls != nil {
+			// Naive is an HTTP/2 proxy protocol: without an h2 ALPN the TLS
+			// handshake negotiates http/1.1 and the inbound rejects CONNECT.
+			// Mirror the hysteria/tuic h3 default when the panel omits alpn.
+			if _, ok := tls["alpn"]; !ok {
+				tls["alpn"] = []string{"h2"}
+			}
 			base["tls"] = tls
 		}
 	}
