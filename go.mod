@@ -293,7 +293,7 @@ require (
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
 
-replace github.com/xtls/reality => github.com/icodex/reality v0.0.0-20261030203531-a32241e97a03
+replace github.com/xtls/reality => github.com/icodex/reality v0.0.0-20261031020313-971a56a09452
 
 replace github.com/xtls/xray-core => github.com/icodex/Xray-core v0.0.0-20261030205927-7b202337d0c5
 
