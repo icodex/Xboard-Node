@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	ob "github.com/cedar2025/xboard-node/internal/outbound"
 )
 
 func ValidateCustomOutbounds(outbounds []OutboundConfig) error {
@@ -54,6 +56,13 @@ func ValidateCustomOutboundsForKernel(outbounds []OutboundConfig, kernelType str
 		}
 		if err := validateOutboundSettings(i, outbound.Settings); err != nil {
 			return err
+		}
+		canonical, err := ob.Parse(outbound.Protocol, outbound.Settings, outbound.StreamSettings, outbound.Mux, outbound.ProxyTag)
+		if err != nil {
+			return fmt.Errorf("custom_outbounds[%d] (%s): %w", i, tag, err)
+		}
+		if err := ob.ValidateForKernel(canonical, kernelType); err != nil {
+			return fmt.Errorf("custom_outbounds[%d] (%s): %w", i, tag, err)
 		}
 		key := strings.ToLower(tag)
 		if _, exists := seen[key]; exists {

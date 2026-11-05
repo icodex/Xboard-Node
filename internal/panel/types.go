@@ -277,12 +277,15 @@ func (c *CertConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// OutboundConfig defines a custom outbound for kernel
+// OutboundConfig defines a custom outbound for kernel. The panel authors it in
+// Xray-native form; the node renders it per running kernel.
 type OutboundConfig struct {
-	Tag      string         `json:"tag"`                 // Unique tag for routing
-	Protocol string         `json:"protocol"`            // vmess, vless, shadowsocks, wireguard, etc.
-	Settings map[string]any `json:"settings,omitempty"`  // Protocol-specific settings
-	ProxyTag string         `json:"proxy_tag,omitempty"` // Chain proxy: next outbound tag
+	Tag            string         `json:"tag"`                      // Unique tag for routing
+	Protocol       string         `json:"protocol"`                 // vmess, vless, shadowsocks, wireguard, etc.
+	Settings       map[string]any `json:"settings,omitempty"`       // Protocol-specific settings
+	StreamSettings map[string]any `json:"streamSettings,omitempty"` // Xray transport/TLS/REALITY
+	Mux            map[string]any `json:"mux,omitempty"`            // Xray multiplex
+	ProxyTag       string         `json:"proxy_tag,omitempty"`      // Chain proxy: next outbound tag
 }
 
 type BaseConfig struct {

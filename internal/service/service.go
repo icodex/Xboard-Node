@@ -66,6 +66,9 @@ type Service struct {
 	// pushActive prevents overlapping push/pull goroutines.
 	pushActive atomic.Bool
 	pullActive atomic.Bool
+	// probeHash dedupes custom-outbound reachability probes: only a changed
+	// outbound set is re-dialed on reload.
+	probeHash atomic.Value
 	// pullResults delivers async pullViaAPI results back to the main goroutine.
 	pullResults chan pullResult
 
@@ -828,6 +831,7 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	if s.nodeLog == nil {
 		s.nodeLog = nlog.ForNode(nc.Protocol, nc.ServerPort)
 	}
+	s.probeOutboundsAsync(nc)
 	s.speedTracker.SetLogCallback(func(msg string) {
 		fullMsg := fmt.Sprintf("speedtracker: %s active_limiters=%d", msg, s.speedTracker.LimitedUserCount())
 		s.nodeLog.Info(fullMsg)
@@ -1015,10 +1019,38 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 			if s.nodeLog != nil {
 				s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
 			}
+			s.probeOutboundsAsync(s.lastConfig)
 		}
 	} else if !s.kernel.IsRunning() {
 		s.startKernel(s.lastConfig, s.lastUsers)
 	}
+}
+
+// probeOutboundsAsync dials the TCP-based custom outbound endpoints in the
+// background and warns about unreachable ones. Routing rules that send traffic
+// into a dead outbound otherwise surface only as per-connection timeouts.
+// Deduped on the outbound set so repeated sync.config pushes do not re-dial.
+func (s *Service) probeOutboundsAsync(nc *model.NodeSpec) {
+	if nc == nil || len(nc.CustomOutbounds) == 0 {
+		return
+	}
+	hash := kernel.ComputeHash(&model.NodeSpec{CustomOutbounds: nc.CustomOutbounds}, nil)
+	if prev, _ := s.probeHash.Load().(string); prev == hash {
+		return
+	}
+	s.probeHash.Store(hash)
+
+	outbounds := nc.CustomOutbounds
+	go func() {
+		for _, result := range kernel.ProbeCustomOutbounds(outbounds, 5*time.Second) {
+			nlog.Core().Warn("custom outbound endpoint unreachable",
+				"tag", result.Tag,
+				"protocol", result.Protocol,
+				"endpoint", result.Endpoint,
+				"error", result.Err,
+				"hint", "traffic routed to this outbound will fail; check the upstream server, its firewall/allowlist, and DNS")
+		}
+	}()
 }
 
 func (s *Service) trackAndEnforce(ctx context.Context) {

@@ -117,11 +117,14 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 		ServerPort: 111,
 		Cipher:     "aes-128-gcm",
 		CustomOutbounds: []panel.OutboundConfig{
-			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4"}}, // Panel override
+			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4", "port": 1080}}, // Panel override
 		},
 	}
 
-	cfg := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	outbounds := cfg["outbounds"].([]M)
 
 	// Since we overrode both 'direct' and 'block', the result should contain
@@ -236,7 +239,10 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 
 	for _, tc := range protocols {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := buildConfig(testKernelCfg, testNodeSpec(&tc.nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+			cfg, err := buildConfig(testKernelCfg, testNodeSpec(&tc.nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+			if err != nil {
+				t.Fatalf("build config %s: %v", tc.name, err)
+			}
 
 			data, err := json.Marshal(cfg)
 			if err != nil {
@@ -269,7 +275,10 @@ func TestBuildConfig_VMess_Users(t *testing.T) {
 		Protocol:   "vmess",
 		ServerPort: 10086,
 	}
-	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	data, _ := json.Marshal(cfg)
 
 	var parsed map[string]interface{}
@@ -309,7 +318,10 @@ func TestBuildConfig_VLESS_Flow(t *testing.T) {
 			"server_name": "example.com",
 		},
 	}
-	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	data, _ := json.Marshal(cfg)
 
 	var parsed map[string]interface{}
@@ -454,6 +466,42 @@ func TestBuildRouting_StructuredCustomRulesRemainFirst(t *testing.T) {
 	}
 }
 
+func TestBuildRouting_RawStructuredRuleCompiles(t *testing.T) {
+	// The production payload: a structured match/action entry pasted into the
+	// raw custom_routes field. It must compile like a custom_route_rules entry.
+	raw := []map[string]any{{
+		"match":  map[string]any{"networks": []any{"tcp", "udp"}},
+		"action": map[string]any{"type": "route", "target": "proxy"},
+	}}
+	routing := buildRouting(nil, nil, raw)
+	xrayRules := routing["rules"].([]M)
+	if xrayRules[0]["outboundTag"] != "proxy" {
+		t.Fatalf("expected outboundTag proxy, got %v", xrayRules[0])
+	}
+	if xrayRules[0]["network"] != "tcp,udp" {
+		t.Fatalf("expected network tcp,udp, got %v", xrayRules[0])
+	}
+}
+
+func TestBuildRouting_KeepsRawRulesVerbatim(t *testing.T) {
+	// Raw panel custom_routes are Xray-native and pass through untouched:
+	// keys the singbox translator rejects (balancerTag, protocol) are legal
+	// Xray here, and "type" survives.
+	raw := []map[string]any{{
+		"type":        "field",
+		"protocol":    []string{"bittorrent"},
+		"balancerTag": "balancer",
+	}}
+	routing := buildRouting(nil, nil, raw)
+	xrayRules := routing["rules"].([]M)
+	if xrayRules[0]["type"] != "field" {
+		t.Fatalf("expected type field preserved, got %v", xrayRules[0])
+	}
+	if xrayRules[0]["balancerTag"] != "balancer" {
+		t.Fatalf("expected balancerTag preserved, got %v", xrayRules[0])
+	}
+}
+
 func TestBuildConfig_LogLevel(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -488,7 +536,10 @@ func TestBuildConfig_SpecLogLevelPriority(t *testing.T) {
 	spec := testNodeSpec(&nc)
 	spec.KernelLogLevel = "error"
 
-	cfg := buildConfig(testKernelCfg, spec, testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, spec, testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	logCfg := cfg["log"].(M)
 	if got := logCfg["loglevel"]; got != "error" {
 		t.Errorf("loglevel: got %v, want error (spec wins)", got)
@@ -496,7 +547,10 @@ func TestBuildConfig_SpecLogLevelPriority(t *testing.T) {
 
 	// Without a spec override the kernel config level applies.
 	spec.KernelLogLevel = ""
-	cfg = buildConfig(testKernelCfg, spec, testUsers, kernel.TLSCert{})
+	cfg, err = buildConfig(testKernelCfg, spec, testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	logCfg = cfg["log"].(M)
 	if got := logCfg["loglevel"]; got != "warning" {
 		t.Errorf("loglevel: got %v, want warning (kcfg fallback)", got)
@@ -513,7 +567,10 @@ func TestBuildConfig_LogOutput(t *testing.T) {
 
 	kcfg := testKernelCfg
 	kcfg.LogOutput = "/var/log/xboard-node/kernel.log"
-	cfg := buildConfig(kcfg, spec, testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(kcfg, spec, testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	logCfg := cfg["log"].(M)
 	if got := logCfg["error"]; got != "/var/log/xboard-node/kernel.log" {
 		t.Errorf("error path: got %v, want file path", got)
@@ -523,7 +580,10 @@ func TestBuildConfig_LogOutput(t *testing.T) {
 	}
 
 	kcfg.LogOutput = "stdout"
-	cfg = buildConfig(kcfg, spec, testUsers, kernel.TLSCert{})
+	cfg, err = buildConfig(kcfg, spec, testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	logCfg = cfg["log"].(M)
 	if got := logCfg["error"]; got != "" {
 		t.Errorf("error path: got %v, want empty (stdout default)", got)
@@ -535,7 +595,10 @@ func TestBuildConfig_StatsEnabled(t *testing.T) {
 		Protocol:   "vmess",
 		ServerPort: 10086,
 	}
-	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	data, _ := json.Marshal(cfg)
 
 	var parsed map[string]interface{}
@@ -565,7 +628,10 @@ func TestBuildConfig_Shadowsocks_MultiUserTraditional(t *testing.T) {
 		ServerPort: 8388,
 		Cipher:     "aes-128-gcm",
 	}
-	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	data, _ := json.Marshal(cfg)
 
 	var parsed map[string]interface{}
@@ -598,7 +664,10 @@ func TestBuildConfig_Shadowsocks_MultiUser(t *testing.T) {
 		Cipher:     "2022-blake3-aes-128-gcm",
 		ServerKey:  "server-key",
 	}
-	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	data, _ := json.Marshal(cfg)
 
 	var parsed map[string]interface{}
@@ -622,7 +691,10 @@ func TestBuildConfig_SocksStats(t *testing.T) {
 		Protocol:   "socks",
 		ServerPort: 1080,
 	}
-	cfg := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(testKernelCfg, testNodeSpec(&nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	data, _ := json.Marshal(cfg)
 
 	var parsed map[string]interface{}

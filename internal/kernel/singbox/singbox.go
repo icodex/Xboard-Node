@@ -99,7 +99,10 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 		}
 	}
 
-	cfgMap := buildConfig(s.cfg, nodeConfig, users, tls)
+	cfgMap, err := buildConfig(s.cfg, nodeConfig, users, tls)
+	if err != nil {
+		return fmt.Errorf("build config: %w", err)
+	}
 	// A config without inbounds means the node protocol is unsupported by
 	// the kernel — refuse to start so the service layer never reports a
 	// running node that cannot accept connections.
@@ -184,7 +187,10 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 		return fmt.Errorf("not running")
 	}
 
-	cfgMap := buildConfig(s.cfg, nodeConfig, users, tls)
+	cfgMap, err := buildConfig(s.cfg, nodeConfig, users, tls)
+	if err != nil {
+		return fmt.Errorf("build config: %w", err)
+	}
 	data, err := json.Marshal(cfgMap)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -530,7 +536,10 @@ func (s *SingBox) UpdateUsers(users []model.UserSpec) (added, removed int, err e
 // reloadInboundsLocked hot-swaps inbound users using UpdatableInbound.
 // Must be called with s.mu held.
 func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
-	cfgMap := buildConfig(s.cfg, s.nodeConfig, users, s.tls)
+	cfgMap, err := buildConfig(s.cfg, s.nodeConfig, users, s.tls)
+	if err != nil {
+		return fmt.Errorf("build config: %w", err)
+	}
 	data, err := json.Marshal(cfgMap)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)

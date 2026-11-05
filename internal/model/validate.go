@@ -55,6 +55,9 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if err := ValidateCustomRouteRules(n.CustomRouteRules, kernelType, availableTags); err != nil {
 		return fmt.Errorf("validate custom route rules: %w", err)
 	}
+	// Raw custom_routes never fail the node: bad entries are dropped with an
+	// error log (legacy panel data must not start a crash loop).
+	SanitizeRawCustomRoutes(n, kernelType, availableTags)
 	if err := validateTransportKernel(n.Network, kernelType); err != nil {
 		return err
 	}

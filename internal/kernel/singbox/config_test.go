@@ -1,9 +1,14 @@
 package singbox
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/option"
+	singJSON "github.com/sagernet/sing/common/json"
 
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/kernel"
@@ -605,7 +610,10 @@ func TestBuildConfig(t *testing.T) {
 		ServerPort: 111,
 		Cipher:     "aes-128-gcm",
 	}
-	cfg := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -646,11 +654,14 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 		ServerPort: 111,
 		Cipher:     "aes-128-gcm",
 		CustomOutbounds: []panel.OutboundConfig{
-			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4"}}, // Panel override
+			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4", "port": 1080}}, // Panel override
 		},
 	}
 
-	cfg := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	cfg, err := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
 	outbounds := cfg["outbounds"].([]M)
 
 	// We have 2 overrides in input, so we should have exactly 2 outbounds total
@@ -683,6 +694,50 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 	}
 }
 
+func TestBuildConfig_CustomOutboundXrayRealityParses(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "shadowsocks",
+		ServerPort: 111,
+		Cipher:     "aes-128-gcm",
+		CustomOutbounds: []panel.OutboundConfig{{
+			Tag:      "proxy",
+			Protocol: "vless",
+			Settings: map[string]any{
+				"id":         "211ed558-90f0-4f32-ba5b-d11c1007e2bf",
+				"flow":       "xtls-rprx-vision",
+				"port":       float64(443),
+				"email":      "t@t.tt",
+				"address":    "example.com",
+				"encryption": "none",
+			},
+			StreamSettings: map[string]any{
+				"network":  "raw",
+				"security": "reality",
+				"realitySettings": map[string]any{
+					"shortId":     "a3e60d54",
+					"publicKey":   "0YPI8dNTtdXKU6IjepNQJxydugtijnvZTQiuU9FmcEs",
+					"serverName":  "www.apple.com",
+					"fingerprint": "chrome",
+				},
+			},
+			Mux: map[string]any{"enabled": false, "concurrency": float64(-1)},
+		}},
+	}
+
+	cfg, err := buildConfig(config.KernelConfig{LogLevel: "warn"}, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	ctx := include.Context(context.Background())
+	if _, err := singJSON.UnmarshalExtendedContext[option.Options](ctx, data); err != nil {
+		t.Fatalf("sing-box parse options: %v", err)
+	}
+}
+
 func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 	protocols := []struct {
 		name string
@@ -703,7 +758,10 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 
 	for _, tc := range protocols {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := buildConfig(config.KernelConfig{LogLevel: "warn"}, testNodeSpec(tc.nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+			cfg, err := buildConfig(config.KernelConfig{LogLevel: "warn"}, testNodeSpec(tc.nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+			if err != nil {
+				t.Fatalf("build config %s: %v", tc.name, err)
+			}
 			data, err := json.Marshal(cfg)
 			if err != nil {
 				t.Fatalf("marshal %s: %v", tc.name, err)
@@ -719,7 +777,10 @@ func TestBuildConfig_AllProtocols_ValidJSON(t *testing.T) {
 // --- Routes ---
 
 func TestBuildRoutes_Default(t *testing.T) {
-	route := buildRoutes(nil, nil, nil)
+	route, err := buildRoutes(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
 	assertMapValue(t, route, "final", "direct")
 
 	rules := route["rules"].([]M)
@@ -736,7 +797,10 @@ func TestBuildRoutes_WithCustomRules(t *testing.T) {
 		{ID: 2, Match: []string{"10.0.0.0/8"}, Action: "block"},
 		{ID: 3, Match: []string{"allowed.com"}, Action: "direct"},
 	}
-	route := buildRoutes(testRouteRules(rules), nil, nil)
+	route, err := buildRoutes(testRouteRules(rules), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
 	allRules := route["rules"].([]M)
 
 	if len(allRules) != 5 {
@@ -761,7 +825,10 @@ func TestBuildRoutes_MultiMatch(t *testing.T) {
 		{ID: 1, Match: []string{"*.evil.com", "bad.org", "192.168.1.0/24"}, Action: "block"},
 		{ID: 2, Match: []string{"*.bypass.com"}, Action: "direct"},
 	}
-	route := buildRoutes(testRouteRules(rules), nil, nil)
+	route, err := buildRoutes(testRouteRules(rules), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
 	allRules := route["rules"].([]M)
 
 	// 2 default private-IP rules + 1 domain rule + 1 CIDR rule + 1 domain rule = 5
@@ -807,7 +874,10 @@ func TestBuildRoutes_WithCustomRouteRules(t *testing.T) {
 			Action: model.RouteAction{Type: "direct"},
 		},
 	}
-	route := buildRoutes(nil, customRules, nil)
+	route, err := buildRoutes(nil, customRules, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
 	allRules := route["rules"].([]M)
 	if len(allRules) != 9 {
 		t.Fatalf("rules count: got %d, want 9", len(allRules))
@@ -836,18 +906,144 @@ func TestBuildRoutes_WithCustomRouteRules(t *testing.T) {
 }
 
 func TestBuildRoutes_StructuredCustomRulesRemainFirst(t *testing.T) {
-	raw := []map[string]any{{"domain": []string{"raw.example.com"}, "outbound": "raw-tag"}}
+	// Panel raw rules are authored in Xray-native form and translated.
+	raw := []map[string]any{{"type": "field", "domain": []string{"raw.example.com"}, "outboundTag": "raw-tag"}}
 	custom := []model.CustomRouteRule{{
 		Match:  model.RouteMatch{DomainSuffixes: []string{"structured.example"}},
 		Action: model.RouteAction{Type: "direct"},
 	}}
-	route := buildRoutes(nil, custom, raw)
+	route, err := buildRoutes(nil, custom, raw, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
 	allRules := route["rules"].([]M)
 	if allRules[0]["outbound"] != "direct" {
 		t.Fatalf("expected structured route first, got %v", allRules[0]["outbound"])
 	}
 	if allRules[1]["outbound"] != "raw-tag" {
 		t.Fatalf("expected raw custom route second, got %v", allRules[1]["outbound"])
+	}
+	if suffix, ok := allRules[1]["domain_suffix"].([]string); !ok || suffix[0] != "raw.example.com" {
+		t.Fatalf("expected translated domain_suffix rule, got %v", allRules[1])
+	}
+}
+
+func TestBuildRoutes_RawXrayBugRuleTranslated(t *testing.T) {
+	raw := []map[string]any{{"type": "field", "network": "udp,tcp", "outboundTag": "proxy"}}
+	route, err := buildRoutes(nil, nil, raw, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
+	rules := route["rules"].([]M)
+	assertMapValue(t, rules[0], "outbound", "proxy")
+	assertMapValue(t, rules[0], "network", []string{"udp", "tcp"})
+}
+
+// testStructuredProductionRule is the exact payload a production panel sent
+// into the raw custom_routes field: a structured match/action entry.
+func testStructuredProductionRule() map[string]any {
+	return map[string]any{
+		"match":  map[string]any{"networks": []any{"tcp", "udp"}},
+		"action": map[string]any{"type": "route", "target": "proxy"},
+	}
+}
+
+func TestBuildRoutes_RawStructuredRuleCompiles(t *testing.T) {
+	raw := []map[string]any{testStructuredProductionRule()}
+	route, err := buildRoutes(nil, nil, raw, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
+	rules := route["rules"].([]M)
+	assertMapValue(t, rules[0], "outbound", "proxy")
+	assertMapValue(t, rules[0], "network", []string{"tcp", "udp"})
+}
+
+func TestBuildRoutes_RawUnsupportedKeySkipsRuleWithoutFailing(t *testing.T) {
+	// SanitizeRawCustomRoutes drops these before the builder; if one slips
+	// through anyway the builder must not fail the kernel build.
+	raw := []map[string]any{
+		{"type": "field", "balancerTag": "b", "outboundTag": "proxy"},
+		{"outbound": "proxy", "ip_cidr": []string{"10.0.0.0/8"}},
+	}
+	route, err := buildRoutes(nil, nil, raw, nil)
+	if err != nil {
+		t.Fatalf("a bad raw rule must not fail the build: %v", err)
+	}
+	rules := route["rules"].([]M)
+	// The sing-box-native entry passes through verbatim.
+	found := false
+	for _, rule := range rules {
+		if rule["outbound"] == "proxy" {
+			if cidrs, ok := rule["ip_cidr"].([]string); ok && len(cidrs) == 1 && cidrs[0] == "10.0.0.0/8" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("sing-box-native entry should pass through verbatim: %v", rules)
+	}
+}
+
+func TestBuildRoutes_StaticConfigRoutesVerbatim(t *testing.T) {
+	// kernel.custom_route is kernel-native by contract: a sing-box-native rule
+	// in the static slot must pass through untouched (keys a translator would
+	// drop, like rule_set, survive).
+	staticRaw := []map[string]any{{"rule_set": []string{"geoip-cn"}, "outbound": "proxy"}}
+	route, err := buildRoutes(nil, nil, nil, staticRaw)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
+	rules := route["rules"].([]M)
+	assertMapValue(t, rules[0], "outbound", "proxy")
+	assertMapValue(t, rules[0], "rule_set", []string{"geoip-cn"})
+}
+
+// TestBuildConfig_RawXrayRoutes_KernelParse pins the original bug end to end:
+// the panel rule {"type":"field","network":"udp,tcp","outboundTag":"proxy"}
+// used to reach sing-box verbatim and fail with "unknown rule type: field".
+// Here the full built config must parse through sing-box's own option parser
+// (the exact stage that used to crash kernel start) with the rule translated.
+func TestBuildConfig_RawXrayRoutes_KernelParse(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "shadowsocks",
+		ServerPort: 8388,
+		CustomOutbounds: []panel.OutboundConfig{{
+			Tag:      "proxy",
+			Protocol: "socks",
+			Settings: map[string]any{"server": "2.2.2.2", "server_port": float64(1080)},
+		}},
+		CustomRoutes: []map[string]any{{
+			"type":        "field",
+			"network":     "udp,tcp",
+			"outboundTag": "proxy",
+		}},
+	}
+	cfg, err := buildConfig(config.KernelConfig{LogLevel: "warn"}, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	ctx := include.Context(context.Background())
+	opts, err := singJSON.UnmarshalExtendedContext[option.Options](ctx, data)
+	if err != nil {
+		t.Fatalf("sing-box parse options (this used to be the bug): %v", err)
+	}
+	if len(opts.Route.Rules) == 0 {
+		t.Fatal("expected route rules, got none")
+	}
+	first := opts.Route.Rules[0]
+	if first.Type != "" && first.Type != "default" {
+		t.Fatalf("expected default rule, got type %q", first.Type)
+	}
+	if got := first.DefaultOptions.RouteOptions.Outbound; got != "proxy" {
+		t.Fatalf("expected outbound proxy, got %q", got)
+	}
+	if !reflect.DeepEqual([]string(first.DefaultOptions.Network), []string{"udp", "tcp"}) {
+		t.Fatalf("expected network [udp tcp], got %v", first.DefaultOptions.Network)
 	}
 }
 

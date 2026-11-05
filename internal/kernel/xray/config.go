@@ -2,6 +2,7 @@ package xray
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -12,20 +13,42 @@ import (
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	ob "github.com/cedar2025/xboard-node/internal/outbound"
+	xr "github.com/cedar2025/xboard-node/internal/route"
 	"github.com/go-viper/mapstructure/v2"
 )
+
+// structuredRawToCustomRule decodes a structured match/action raw entry into
+// the model rule the compiler consumes (see the singbox builder twin).
+func structuredRawToCustomRule(rule map[string]any) (model.CustomRouteRule, error) {
+	var parsed model.CustomRouteRule
+	data, err := json.Marshal(rule)
+	if err != nil {
+		return parsed, err
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return parsed, err
+	}
+	return parsed, nil
+}
 
 // M is a shorthand for building JSON-like maps
 type M = map[string]interface{}
 
-func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) (M, error) {
 	var outbounds []M
 	tags := make(map[string]bool)
 
-	// Panel-defined custom outbounds (structured, converted to Xray native)
+	// Panel-defined custom outbounds are authored in Xray-native form and kept
+	// native here (flat shorthand is assembled into vnext/servers/peers).
 	for _, co := range nc.CustomOutbounds {
-		outbounds = append(outbounds, outboundConfigToXray(co))
+		converted, err := outboundConfigToXray(co)
+		if err != nil {
+			return nil, fmt.Errorf("custom outbound %q: %w", co.Tag, err)
+		}
+		outbounds = append(outbounds, converted)
 		tags[strings.ToLower(co.Tag)] = true
+		kernel.LogRenderedOutbound(co)
 	}
 
 	// Static outbounds from local config file
@@ -87,24 +110,18 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	cfg["routing"] = buildRouting(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
 
 	mergeCustomXray(cfg, kcfg)
-	return cfg
+	return cfg, nil
 }
 
-// outboundConfigToXray converts a structured OutboundConfig (from the panel)
-// into an Xray outbound object. Xray uses a nested layout where protocol-
-// specific fields go inside a "settings" key, and chain proxying uses "proxySettings".
-func outboundConfigToXray(oc model.OutboundConfig) M {
-	m := M{
-		"protocol": oc.Protocol,
-		"tag":      oc.Tag,
+// outboundConfigToXray converts a panel outbound into an Xray outbound object.
+// Native Xray settings are passed through; flat shorthand is assembled into the
+// vnext/servers/peers structure Xray requires.
+func outboundConfigToXray(oc model.OutboundConfig) (M, error) {
+	canonical, err := ob.Parse(oc.Protocol, oc.Settings, oc.StreamSettings, oc.Mux, oc.ProxyTag)
+	if err != nil {
+		return nil, err
 	}
-	if len(oc.Settings) > 0 {
-		m["settings"] = oc.Settings
-	}
-	if oc.ProxyTag != "" {
-		m["proxySettings"] = M{"tag": oc.ProxyTag}
-	}
-	return m
+	return canonical.RenderXray(oc.Tag)
 }
 
 func mergeRouteList(a, b []map[string]any) []map[string]any {
@@ -278,10 +295,24 @@ func applyXrayPolicy(base M, nc *model.NodeSpec) {
 			sniffing["destOverride"] = []string{"http", "tls", "quic"}
 		}
 		base["sniffing"] = sniffing
+		if nc.Sniff.Timeout > 0 {
+			nlog.Core().Warn("xray sniffing has no timeout knob, ignoring sniff.timeout", "protocol", nc.Protocol)
+		}
+		if nc.Sniff.TCPPorts != "" || nc.Sniff.UDPPorts != "" {
+			nlog.Core().Warn("xray inbound sniffing has no port filter (tcpPorts/udpPorts), sniffing applies to all traffic", "protocol", nc.Protocol)
+		}
+	}
+
+	if nc.UDPIdleTimeout > 0 {
+		nlog.Core().Warn("xray has no per-inbound udp idle timeout, ignoring udp_idle_timeout", "protocol", nc.Protocol)
 	}
 
 	if nc.Multiplex != nil && nc.Multiplex.Enabled {
-		nlog.Core().Warn("xray inbound has no multiplex support (panel multiplex is a sing-box-only feature), ignoring", "protocol", nc.Protocol)
+		// xray demuxes mux.cool traffic transparently on every inbound: mux
+		// clients keep working with the toggle off, and the panel's multiplex
+		// knobs (padding/brutal) have no server-side equivalent to apply. The
+		// toggle only gates whether the sing-box inbound accepts mux streams.
+		nlog.Core().Warn("xray inbound has no multiplex config (mux clients still work: mux.cool is transparent server-side); the panel toggle only affects sing-box inbounds", "protocol", nc.Protocol)
 	}
 }
 
@@ -799,8 +830,25 @@ func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteR
 		xrayRules = append(xrayRules, compileCustomRouteRule(rule)...)
 	}
 
-	// Raw custom routes remain the escape hatch, but no longer outrank structured rules.
+	// Raw custom routes remain the escape hatch, but no longer outrank
+	// structured rules. Structured match/action entries compile per kernel;
+	// Xray-native entries pass through verbatim (the singbox kernel is the
+	// side that translates; see internal/route + singbox buildRoutes).
+	// SanitizeRawCustomRoutes has already dropped sing-box-native entries and
+	// unparseable ones with a log.
 	for _, cr := range customRules {
+		if xr.IsStructuredRule(cr) {
+			parsed, err := structuredRawToCustomRule(cr)
+			if err != nil {
+				nlog.Core().Error("skipping unparseable structured custom route", "error", err)
+				continue
+			}
+			if parsed.Disabled {
+				continue
+			}
+			xrayRules = append(xrayRules, compileCustomRouteRule(parsed)...)
+			continue
+		}
 		xrayRules = append(xrayRules, M(cr))
 	}
 

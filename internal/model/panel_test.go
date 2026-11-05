@@ -14,7 +14,7 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 			Protocol:   "shadowsocks",
 			ServerPort: 8388,
 			CustomOutbounds: []panel.OutboundConfig{
-				{Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk"}},
+				{Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk", "peer_public_key": "peer"}},
 				{Tag: "proxy", Protocol: "socks", ProxyTag: "warp", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080}},
 			},
 			CustomRouteRules: []panel.CustomRouteRule{{
@@ -67,7 +67,7 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 			Protocol:   "shadowsocks",
 			ServerPort: 8388,
 			CustomOutbounds: []panel.OutboundConfig{{
-				Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk"},
+				Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk", "peer_public_key": "peer"},
 			}},
 			CustomRouteRules: []panel.CustomRouteRule{{
 				Action: panel.RouteAction{Type: "route", Target: "missing"},

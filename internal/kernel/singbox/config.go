@@ -2,8 +2,8 @@ package singbox
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -12,21 +12,29 @@ import (
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	ob "github.com/cedar2025/xboard-node/internal/outbound"
 	"github.com/cedar2025/xboard-node/internal/panel"
+	xr "github.com/cedar2025/xboard-node/internal/route"
 	"github.com/go-viper/mapstructure/v2"
 )
 
 // M is a shorthand for building JSON-like maps
 type M = map[string]interface{}
 
-func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) (M, error) {
 	var outbounds []M
 	tags := make(map[string]bool)
 
-	// Panel-defined custom outbounds (structured, converted to sing-box native)
+	// Panel-defined custom outbounds are authored in Xray-native form and
+	// translated to the sing-box flat layout here.
 	for _, co := range nc.CustomOutbounds {
-		outbounds = append(outbounds, outboundConfigToSingbox(co))
+		converted, err := outboundConfigToSingbox(co)
+		if err != nil {
+			return nil, fmt.Errorf("custom outbound %q: %w", co.Tag, err)
+		}
+		outbounds = append(outbounds, converted)
 		tags[strings.ToLower(co.Tag)] = true
+		kernel.LogRenderedOutbound(co)
 	}
 
 	// Static outbounds from local config file
@@ -63,7 +71,11 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	}
 
 	// Merge panel routes and static config routes
-	cfg["route"] = buildRoutes(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
+	route, err := buildRoutes(nc.Routes, nc.CustomRouteRules, nc.CustomRoutes, kcfg.CustomRoute)
+	if err != nil {
+		return nil, err
+	}
+	cfg["route"] = route
 
 	// cache_file is ALWAYS pinned to a per-instance path: the nlogBridge is
 	// passed as PlatformLogWriter, which makes sing-box create a cache-file
@@ -80,77 +92,36 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	}
 
 	mergeCustomSingbox(cfg, kcfg)
-	return cfg
+	return cfg, nil
 }
 
-// outboundConfigToSingbox converts a structured OutboundConfig (from the panel)
-// into a sing-box outbound object. sing-box uses a flat layout where all
+// outboundConfigToSingbox converts a panel outbound (Xray-native form) into a
+// sing-box outbound object. sing-box uses a flat layout where all
 // protocol-specific fields sit at the top level alongside "type" and "tag".
-func outboundConfigToSingbox(oc model.OutboundConfig) M {
-	m := M{
-		"type": oc.Protocol,
-		"tag":  oc.Tag,
+func outboundConfigToSingbox(oc model.OutboundConfig) (M, error) {
+	canonical, err := ob.Parse(oc.Protocol, oc.Settings, oc.StreamSettings, oc.Mux, oc.ProxyTag)
+	if err != nil {
+		return nil, err
 	}
-
-	// Transform common protocol keys to sing-box native format
-	// WireGuard: secret_key -> private_key; peers: endpoint -> address+port
-	if oc.Protocol == "wireguard" {
-		if sk, ok := oc.Settings["secret_key"]; ok {
-			m["private_key"] = sk
-		}
-		if peers, ok := oc.Settings["peers"].([]any); ok {
-			var wgPeers []M
-			for _, p := range peers {
-				if peerMap, ok := p.(map[string]any); ok {
-					newPeer := M{}
-					for k, v := range peerMap {
-						if k == "endpoint" {
-							if ep, ok := v.(string); ok {
-								host, portStr, err := net.SplitHostPort(ep)
-								if err == nil {
-									newPeer["address"] = host
-									port, _ := strconv.Atoi(portStr)
-									newPeer["port"] = port
-								} else {
-									newPeer["address"] = ep
-								}
-							}
-						} else {
-							newPeer[k] = v
-						}
-					}
-					wgPeers = append(wgPeers, newPeer)
-				}
-			}
-			m["peers"] = wgPeers
-		}
-
-		// Copy any other top-level settings not handled above
-		for k, v := range oc.Settings {
-			if k != "secret_key" && k != "peers" {
-				m[k] = v
-			}
-		}
-	} else {
-		for k, v := range oc.Settings {
-			m[k] = v
-		}
-	}
-
-	if oc.ProxyTag != "" {
-		m["proxy_tag"] = oc.ProxyTag
-	}
-	return m
+	return canonical.RenderSingbox(oc.Tag)
 }
 
-func mergeRouteList(a, b []map[string]any) []map[string]any {
-	res := make([]map[string]any, 0, len(a)+len(b))
-	res = append(res, a...)
-	res = append(res, b...)
-	return res
+// structuredRawToCustomRule decodes a structured match/action raw entry into
+// the model rule the compiler consumes. Field names match case-insensitively
+// (encoding/json), mirroring the panel's custom_route_rules shape.
+func structuredRawToCustomRule(rule map[string]any) (model.CustomRouteRule, error) {
+	var parsed model.CustomRouteRule
+	data, err := json.Marshal(rule)
+	if err != nil {
+		return parsed, err
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return parsed, err
+	}
+	return parsed, nil
 }
 
-func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteRule, custom []map[string]any) M {
+func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteRule, panelRaw []map[string]any, staticRaw []map[string]any) (M, error) {
 	var rules []M
 
 	// Structured custom routes now take the highest priority for panel-managed overrides.
@@ -161,8 +132,39 @@ func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteR
 		rules = append(rules, compileCustomRouteRule(rule)...)
 	}
 
-	// Raw custom routes remain the escape hatch, but no longer outrank structured rules.
-	for _, cr := range custom {
+	// Raw custom routes remain the escape hatch, but no longer outrank
+	// structured rules. Three shapes arrive here (SanitizeRawCustomRoutes has
+	// already dropped the broken ones): structured match/action entries
+	// compile like custom_route_rules, Xray-native rules translate, and
+	// sing-box-native rules pass through verbatim. Translation failures skip
+	// the rule with a log — a bad raw rule must never fail the kernel build.
+	for _, cr := range panelRaw {
+		switch {
+		case xr.IsStructuredRule(cr):
+			parsed, err := structuredRawToCustomRule(cr)
+			if err != nil {
+				nlog.Core().Error("skipping unparseable structured custom route", "error", err)
+				continue
+			}
+			if parsed.Disabled {
+				continue
+			}
+			rules = append(rules, compileCustomRouteRule(parsed)...)
+		default:
+			parsed, err := xr.ParseRule(cr)
+			if err != nil {
+				// sing-box-native rules carry keys ParseRule rejects; they are
+				// singbox kernel-native and pass through verbatim.
+				rules = append(rules, M(cr))
+				continue
+			}
+			rules = append(rules, M(xr.RenderSingbox(parsed)))
+		}
+	}
+
+	// kernel.custom_route from the local config file is kernel-native by
+	// contract (like kernel.custom_outbound) and passes through verbatim.
+	for _, cr := range staticRaw {
 		rules = append(rules, M(cr))
 	}
 
@@ -198,7 +200,7 @@ func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteR
 	return M{
 		"final": "direct",
 		"rules": rules,
-	}
+	}, nil
 }
 
 func compilePanelRouteRule(pr model.RouteRule) []M {
