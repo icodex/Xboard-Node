@@ -38,3 +38,6 @@ cmd/xboard-node-bench
 .test-cfg/
 .test-run/
 tmp-scripts/
+# matrix test artifacts: per-node evidence, progress, reports, archives
+.test-results/
+.test-results.archive-*/

@@ -29,6 +29,17 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return fmt.Errorf("cipher %q cannot serve multiple users: SIP022 identity headers (EIH) are AES-only; use a 2022-blake3-aes-*-gcm cipher", n.Cipher)
 	}
 
+	// The xray fork's infra/conf cipherFromString only knows the methods below
+	// (plus the shadowsocks_2022 ones); anything else resolves to
+	// CipherType_UNKNOWN and the kernel dies at config parse. Reject up front
+	// so the panel gets an actionable error instead of a retry loop.
+	if kernelType == "xray" && n.Protocol == "shadowsocks" {
+		cipher := strings.ToLower(strings.TrimSpace(n.Cipher))
+		if !xrayShadowsocksCiphers[cipher] {
+			return fmt.Errorf("cipher %q is not supported by xray kernel: use aes-128-gcm/aes-256-gcm/chacha20-ietf-poly1305/xchacha20-ietf-poly1305/2022-blake3-aes-*-gcm, or switch kernel to singbox/auto", n.Cipher)
+		}
+	}
+
 	// Neither kernel implements SIP003 plugins; serving such a node would run
 	// a plaintext-capable inbound while clients try to dial with the plugin
 	// from the subscription link and fail without any server-side hint.
@@ -62,6 +73,19 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return err
 	}
 	return nil
+}
+
+// xrayShadowsocksCiphers lists the Shadowsocks methods the pinned xray-core
+// fork can serve: infra/conf/shadowsocks.go cipherFromString (AEAD) plus
+// proxy/shadowsocks_2022 methods. 2022-blake3-chacha is excluded upstream for
+// multi-user (see the SIP022 check in ValidateNodeSpec).
+var xrayShadowsocksCiphers = map[string]bool{
+	"aes-128-gcm":             true,
+	"aes-256-gcm":             true,
+	"chacha20-ietf-poly1305":  true,
+	"xchacha20-ietf-poly1305": true,
+	"2022-blake3-aes-128-gcm": true,
+	"2022-blake3-aes-256-gcm": true,
 }
 
 // singboxUnsupportedTransports lists transport types that sing-box does not support.

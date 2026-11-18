@@ -49,6 +49,7 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 	t.Run("reject unsupported protocol for kernel", func(t *testing.T) {
 		_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 			Protocol:   "shadowsocks",
+			Cipher:     "aes-256-gcm",
 			ServerPort: 8388,
 			CustomOutbounds: []panel.OutboundConfig{{
 				Tag: "hy2", Protocol: "hysteria2", Settings: map[string]any{"server": "2.2.2.2", "server_port": 8443},

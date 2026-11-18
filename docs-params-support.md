@@ -71,6 +71,7 @@ toggle when sing-box nodes serve mux users.
 | `plugin` / `plugin_opts` | ❌ rejected at node validation; panel prohibits non-empty saves. No kernel implements SIP003 server-side |
 | `obfs` / `obfs_settings.*` | panel prohibits non-empty saves (2026-11-06): no kernel implements ss simple-obfs server-side; node would serve plaintext while obfs clients fail — the original silent-breakage case |
 | `server_key` (SS2022) | ✅ derived by the panel, consumed by both kernels |
+| `cipher` | xray: only `aes-128-gcm`/`aes-256-gcm`/`chacha20-ietf-poly1305`/`xchacha20-ietf-poly1305`/`2022-blake3-aes-{128,256}-gcm` (fork `cipherFromString`); anything else — e.g. `aes-192-gcm` — is rejected at node validation, and the panel refuses the save when `kernel_type=xray`. sing-box accepts `aes-192-gcm` |
 
 ## VMess / VLESS TLS
 

@@ -129,6 +129,45 @@ func TestValidateNodeSpec_SS2022ChachaRejected(t *testing.T) {
 	}
 }
 
+func TestValidateNodeSpec_XrayShadowsocksCipher(t *testing.T) {
+	// The 146 SS-aes-192-gcm-xray node: panel dispatched kernel_type=xray with
+	// a cipher the pinned xray fork cannot parse; the node must refuse it
+	// before starting the kernel.
+	spec := &NodeSpec{Protocol: "shadowsocks", Cipher: "aes-192-gcm"}
+
+	err := ValidateNodeSpec(spec, config.KernelConfig{Type: "xray"})
+	if err == nil {
+		t.Fatal("xray + aes-192-gcm: expected rejection, got nil")
+	}
+	if !contains(err.Error(), "not supported by xray") {
+		t.Errorf("error should name the xray kernel, got %q", err.Error())
+	}
+
+	// sing-box and auto (which resolves Shadowsocks to sing-box) still accept it.
+	if err := ValidateNodeSpec(spec, config.KernelConfig{Type: "singbox"}); err != nil {
+		t.Errorf("singbox + aes-192-gcm: unexpected error %v", err)
+	}
+	if err := ValidateNodeSpec(spec, config.KernelConfig{Type: "auto"}); err != nil {
+		t.Errorf("auto + aes-192-gcm: unexpected error %v", err)
+	}
+
+	// auto resolves to xray when the panel pins kernel_type=xray.
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-192-gcm", KernelType: "xray"}, config.KernelConfig{Type: "auto"}); err == nil || !contains(err.Error(), "not supported by xray") {
+		t.Errorf("auto + panel kernel_type=xray: want rejection, got %v", err)
+	}
+
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "xray"}); err != nil {
+		t.Errorf("xray + aes-256-gcm: unexpected error %v", err)
+	}
+
+	for _, cipher := range []string{"", "   "} {
+		err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: cipher}, config.KernelConfig{Type: "xray"})
+		if err == nil || !contains(err.Error(), "not supported by xray") {
+			t.Errorf("xray + cipher %q: want rejection, got %v", cipher, err)
+		}
+	}
+}
+
 func TestValidateNodeSpec_SSPluginRejected(t *testing.T) {
 	err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm", Plugin: "simple-obfs", PluginOpt: "obfs=http"}, config.KernelConfig{Type: "singbox"})
 	if err == nil {

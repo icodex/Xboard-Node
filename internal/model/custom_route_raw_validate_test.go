@@ -10,6 +10,7 @@ import (
 func rawRoutesSpec(routes []map[string]any) *panel.NodeConfig {
 	return &panel.NodeConfig{
 		Protocol:     "shadowsocks",
+		Cipher:       "aes-256-gcm",
 		ServerPort:   8388,
 		CustomRoutes: routes,
 	}
