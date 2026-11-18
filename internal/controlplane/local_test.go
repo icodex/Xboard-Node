@@ -12,8 +12,8 @@ func TestLocalControlPlaneInitial(t *testing.T) {
 		Kernel: config.KernelConfig{Type: "singbox", LogLevel: "warn"},
 		Standalone: &config.StandaloneConfig{
 			Enabled: true,
-			Node: config.StandaloneNodeConfig{Protocol: "shadowsocks", ServerPort: 8388, Cipher: "aes-128-gcm"},
-			Users: []config.StandaloneUser{{ID: 1, UUID: "secret"}},
+			Node:    config.StandaloneNodeConfig{Protocol: "shadowsocks", ServerPort: 8388, Cipher: "aes-128-gcm"},
+			Users:   []config.StandaloneUser{{ID: 1, UUID: "secret"}},
 		},
 	})
 	bootstrap, err := cp.Initial(context.Background(), nil, nil, nil)

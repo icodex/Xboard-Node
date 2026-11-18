@@ -430,7 +430,6 @@ kernel:
 	}
 }
 
-
 func TestLoadRoot_LegacyConfigNormalizesToSingleInstance(t *testing.T) {
 	path := writeTemp(t, `
 panel:

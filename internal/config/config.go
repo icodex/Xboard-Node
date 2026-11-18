@@ -19,14 +19,14 @@ import (
 )
 
 type Config struct {
-	InstanceID string `yaml:"-"`
-	Panel   PanelConfig   `yaml:"panel"`
-	Node    NodeConfig    `yaml:"node"`
-	Kernel  KernelConfig  `yaml:"kernel"`
-	Cert    CertConfig    `yaml:"cert"`
-	Log     LogConfig     `yaml:"log"`
-	Runtime RuntimeConfig `yaml:"runtime"`
-	WS      WSConfig      `yaml:"ws"`
+	InstanceID string        `yaml:"-"`
+	Panel      PanelConfig   `yaml:"panel"`
+	Node       NodeConfig    `yaml:"node"`
+	Kernel     KernelConfig  `yaml:"kernel"`
+	Cert       CertConfig    `yaml:"cert"`
+	Log        LogConfig     `yaml:"log"`
+	Runtime    RuntimeConfig `yaml:"runtime"`
+	WS         WSConfig      `yaml:"ws"`
 	// Standalone enables a local-only node that never contacts the panel.
 	Standalone *StandaloneConfig `yaml:"standalone,omitempty"`
 	// HealthPort enables a lightweight HTTP health-check endpoint on the

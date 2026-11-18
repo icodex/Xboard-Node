@@ -57,7 +57,6 @@ func WatchConfig(ctx context.Context, path string, onChange func(*Config)) (*Wat
 	return w, nil
 }
 
-
 // WatchConfigRoot watches path and reloads the root config model.
 func WatchConfigRoot(ctx context.Context, path string, onChange func(*RootConfig)) (*Watcher, error) {
 	absPath, err := filepath.Abs(path)
