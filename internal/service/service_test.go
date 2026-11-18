@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -482,5 +483,43 @@ func TestApplyChangesDefersWhileCertInFlight(t *testing.T) {
 	s.applyChanges(context.Background(), true, false)
 	if k.reloadCalls != 1 {
 		t.Fatalf("Reload calls after cert completed = %d, want 1", k.reloadCalls)
+	}
+}
+
+// A failing reconfiguration must not report success or leave the worker
+// counter stuck. Cancelling the context must end the retry backoff promptly.
+func TestCertReconfigureFailureCancelsCleanly(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.startCertReconfigure(ctx, config.CertConfig{
+		CertMode: "file",
+		CertFile: filepath.Join(t.TempDir(), "missing.pem"),
+		KeyFile:  filepath.Join(t.TempDir(), "missing.key"),
+	})
+
+	// The worker fails fast (missing file) and enters its backoff loop.
+	deadline := time.Now().Add(2 * time.Second)
+	for s.certWorkers.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.certWorkers.Load(); got != 1 {
+		t.Fatalf("certWorkers = %d, want 1 while the worker runs", got)
+	}
+
+	cancel()
+	deadline = time.Now().Add(2 * time.Second)
+	for s.certWorkers.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.certWorkers.Load(); got != 0 {
+		t.Fatalf("certWorkers = %d, want 0 after cancellation", got)
+	}
+	select {
+	case upd := <-s.certUpdates:
+		t.Fatalf("unexpected certificate update after failure: %+v", upd)
+	default:
 	}
 }
