@@ -37,6 +37,9 @@ func ValidateCustomRouteRules(rules []CustomRouteRule, kernelType string, availa
 		if err := ensureRouteMatcherSupported(i, kernelType, matcherSupport, rule.Match); err != nil {
 			return err
 		}
+		if err := validateMatcherValues(kernelType, rule.Match, fmt.Sprintf("custom_route_rules[%d].match", i)); err != nil {
+			return err
+		}
 		if err := validatePortSpecs(rule.Match.Ports, fmt.Sprintf("custom_route_rules[%d].match.ports", i)); err != nil {
 			return err
 		}
@@ -129,6 +132,72 @@ func hasAnyNonBlank(values []string) bool {
 		}
 	}
 	return false
+}
+
+// matcherValuePrefix classifies a structured matcher value that carries a
+// kernel matcher prefix instead of a plain domain or CIDR.
+func matcherValuePrefix(value string) string {
+	lowered := strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"geoip", "geosite", "ext", "domain", "full", "regexp"} {
+		if strings.HasPrefix(lowered, prefix+":") {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// validateMatcherValues rejects matcher values the target kernel cannot
+// interpret and prefixes used under the wrong matcher. On sing-box a
+// "geosite:"/"full:" value fails config parsing or silently becomes a literal;
+// on xray "geosite:" inside ip_cidrs never matches.
+func validateMatcherValues(kernelType string, match RouteMatch, field string) error {
+	kernelType = strings.ToLower(strings.TrimSpace(kernelType))
+	if kernelType == "" {
+		return nil
+	}
+	check := func(values []string, kind, label string) error {
+		for _, value := range values {
+			prefix := matcherValuePrefix(value)
+			if prefix == "" {
+				continue
+			}
+			if kernelType == "singbox" {
+				switch prefix {
+				case "geoip", "geosite", "ext":
+					return fmt.Errorf("%s.%s contains %q: the sing-box kernel has no geoip/geosite databases; use the xray kernel or plain CIDRs/domains", field, label, value)
+				default:
+					return fmt.Errorf("%s.%s contains %q: the sing-box kernel has no %s: matcher prefix; use plain domains", field, label, value, prefix)
+				}
+			}
+			switch prefix {
+			case "ext":
+				// ext:<file>:<tag> is valid for both domain and ip matchers.
+			case "geoip":
+				if kind != "ip" {
+					return fmt.Errorf("%s.%s contains %q: geoip references belong under ip_cidrs/source_cidrs", field, label, value)
+				}
+			case "geosite":
+				if kind != "domain" {
+					return fmt.Errorf("%s.%s contains %q: geosite references belong under domains/domain_suffixes", field, label, value)
+				}
+			default: // domain, full, regexp
+				if kind != "domain" {
+					return fmt.Errorf("%s.%s contains %q: %s: is a domain matcher prefix and is not valid for IPs", field, label, value, prefix)
+				}
+			}
+		}
+		return nil
+	}
+	if err := check(match.IPCIDRs, "ip", "ip_cidrs"); err != nil {
+		return err
+	}
+	if err := check(match.SourceCIDRs, "ip", "source_cidrs"); err != nil {
+		return err
+	}
+	if err := check(match.Domains, "domain", "domains"); err != nil {
+		return err
+	}
+	return check(match.DomainSuffixes, "domain", "domain_suffixes")
 }
 
 func validateNetworks(values []string, field string) error {

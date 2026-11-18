@@ -19,13 +19,6 @@ import (
 	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
-// ipPool caches ipSnapshot maps to reduce allocations.
-var ipPool = sync.Pool{
-	New: func() interface{} {
-		return make(map[string]struct{}, 16)
-	},
-}
-
 // ─── Per-user statistics ────────────────────────────────────────────────────
 
 // userStats holds per-user traffic counters and alive IP tracking.
@@ -57,38 +50,6 @@ func (u *userStats) removeConn(sourceIP string) {
 		delete(u.ips, sourceIP)
 	}
 	u.mu.Unlock()
-}
-
-// distinctIPs returns the number of distinct IPs currently connected.
-func (u *userStats) distinctIPs() int {
-	u.mu.Lock()
-	n := len(u.ips)
-	u.mu.Unlock()
-	return n
-}
-
-// ipSnapshot returns a pooled copy of the current IP set.
-func (u *userStats) ipSnapshot() map[string]struct{} {
-	cp := ipPool.Get().(map[string]struct{})
-	for k := range cp {
-		delete(cp, k)
-	}
-	u.mu.Lock()
-	for ip := range u.ips {
-		cp[ip] = struct{}{}
-	}
-	u.mu.Unlock()
-	return cp
-}
-
-// releaseIPSnapshot returns the snapshot to pool.
-// Large maps are discarded to prevent memory bloat.
-func releaseIPSnapshot(m map[string]struct{}) {
-	// Discard large maps to prevent pool memory bloat
-	if len(m) > 64 {
-		return
-	}
-	ipPool.Put(m)
 }
 
 // aliveIPList returns the set of alive IPs as a boolean map (for reporting).
@@ -229,21 +190,13 @@ func (t *ConnTracker) RoutedConnection(
 	us := t.users[uid]
 	t.usersMu.RUnlock()
 
-	// Device limit gate-keeping
-	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
-		if limit, hasLimit := (*dlf)(uuid); hasLimit {
-			if t.checkDeviceGate(us, uid, sourceIP, limit) {
-				nlog.Core().Info("singbox: device limit gate-keep, rejecting connection",
-					"user", uuid, "ip", sourceIP, "limit", limit)
-				conn.Close()
-				return conn
-			}
-		}
-	}
-
-	// Register connection
-	if us != nil {
-		us.addConn(sourceIP)
+	// Device limit gate-keeping registers the connection under the same lock,
+	// so concurrent admissions cannot both pass the count check.
+	if !t.admitConnectionFor(us, uid, uuid, sourceIP) {
+		nlog.Core().Info("singbox: device limit gate-keep, rejecting connection",
+			"user", uuid, "ip", sourceIP)
+		conn.Close()
+		return conn
 	}
 
 	var lim *rate.Limiter
@@ -276,20 +229,13 @@ func (t *ConnTracker) RoutedPacketConnection(
 	us := t.users[uid]
 	t.usersMu.RUnlock()
 
-	// Device limit gate-keeping
-	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
-		if limit, hasLimit := (*dlf)(uuid); hasLimit {
-			if t.checkDeviceGate(us, uid, sourceIP, limit) {
-				nlog.Core().Info("singbox: device limit gate-keep, rejecting UDP connection",
-					"user", uuid, "ip", sourceIP, "limit", limit)
-				conn.Close()
-				return conn
-			}
-		}
-	}
-
-	if us != nil {
-		us.addConn(sourceIP)
+	// Device limit gate-keeping registers the connection under the same lock,
+	// so concurrent admissions cannot both pass the count check.
+	if !t.admitConnectionFor(us, uid, uuid, sourceIP) {
+		nlog.Core().Info("singbox: device limit gate-keep, rejecting UDP connection",
+			"user", uuid, "ip", sourceIP)
+		conn.Close()
+		return conn
 	}
 
 	var lim *rate.Limiter
@@ -319,72 +265,90 @@ func (t *ConnTracker) RoutedFlow(
 	return nil
 }
 
-// checkDeviceGate rejects connections exceeding device limit.
+// admitConnectionFor looks up the device limit for uuid and admits the
+// connection, registering its source IP in the same critical section.
+func (t *ConnTracker) admitConnectionFor(us *userStats, userID int, uuid, sourceIP string) bool {
+	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
+		if limit, hasLimit := (*dlf)(uuid); hasLimit {
+			return t.admitConnection(us, userID, sourceIP, limit)
+		}
+	}
+	if us != nil {
+		us.addConn(sourceIP)
+	}
+	return true
+}
+
+// admitConnection reports whether a new connection from sourceIP is allowed
+// under the device limit, and registers it when allowed. The check and the
+// registration happen under one us.mu write lock: the previous split version
+// let two concurrent connections from new IPs both observe localCount < limit
+// and pass, exceeding the limit.
+//
 // Strategy: merge local + global state when fresh; local-only when stale.
-func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string, limit int) bool {
-	if us == nil || limit <= 0 {
-		return false
+// Global state is snapshotted first (globalMu is never taken while holding
+// us.mu anywhere, so this order cannot deadlock).
+func (t *ConnTracker) admitConnection(us *userStats, userID int, sourceIP string, limit int) bool {
+	if us == nil {
+		return true
+	}
+	if limit <= 0 {
+		us.addConn(sourceIP)
+		return true
 	}
 
-	us.mu.RLock()
-	localIPs := make(map[string]bool, len(us.ips))
-	for ip := range us.ips {
-		localIPs[ip] = true
-	}
-	localCount := len(us.ips)
-	us.mu.RUnlock()
-
-	// Already known locally
-	if localIPs[sourceIP] {
-		return false
-	}
-
-	// Check global state freshness
 	t.globalMu.RLock()
 	globalStale := time.Since(t.globalLastUpdate) > 60*time.Second
 	globalIPs := t.globalDevices[userID]
 	t.globalMu.RUnlock()
+	if globalStale {
+		globalIPs = nil
+	}
 
-	// Stale or missing global state → local-only check
-	if globalStale || globalIPs == nil {
-		if localCount < limit {
-			return false
-		}
-		ipList := make([]string, 0, localCount+1)
-		for ip := range localIPs {
-			ipList = append(ipList, ip)
-		}
-		ipList = append(ipList, sourceIP)
-		sort.Strings(ipList)
-		for i := 0; i < limit && i < len(ipList); i++ {
-			if ipList[i] == sourceIP {
-				return false
-			}
-		}
-		nlog.Core().Debug("device limit: local over limit, rejecting",
-			"userID", userID, "ip", sourceIP, "localIPs", localCount, "limit", limit)
+	us.mu.Lock()
+	defer us.mu.Unlock()
+
+	if us.ips[sourceIP] > 0 {
+		us.ips[sourceIP]++
+		us.connCount++
 		return true
 	}
 
-	// Known globally (from other node)
+	// Known globally: this or another node already serves the IP.
 	if globalIPs[sourceIP] {
+		us.ips[sourceIP] = 1
+		us.connCount++
+		return true
+	}
+
+	// This node already carries the user's full allowance. The lexicographic
+	// rule below only picks among candidates when a local slot is free;
+	// without this check a brand-new lower-sorting IP was admitted on top of
+	// the existing ones (limit 2, 9.9.9.9 + 8.8.8.8 connected, 1.1.1.1
+	// admitted → 3 devices).
+	if len(us.ips) >= limit {
+		nlog.Core().Debug("device limit: local capacity reached, rejecting",
+			"userID", userID, "ip", sourceIP, "localIPs", len(us.ips), "limit", limit)
 		return false
 	}
 
-	// Merge local + global
-	allIPs := make(map[string]bool)
-	for ip := range localIPs {
-		allIPs[ip] = true
+	// Merge local + global; the node's own report echoes back, so overlaps
+	// deduplicate naturally. Global IPs never enter the refcounts.
+	allIPs := make(map[string]struct{}, len(us.ips)+len(globalIPs)+1)
+	for ip := range us.ips {
+		allIPs[ip] = struct{}{}
 	}
 	for ip := range globalIPs {
-		allIPs[ip] = true
+		allIPs[ip] = struct{}{}
 	}
 
 	if len(allIPs) < limit {
-		return false
+		us.ips[sourceIP] = 1
+		us.connCount++
+		return true
 	}
 
-	// Over limit → lexicographic selection
+	// Over limit — deterministic: allow the lowest IPs lexicographically.
 	ipList := make([]string, 0, len(allIPs)+1)
 	for ip := range allIPs {
 		ipList = append(ipList, ip)
@@ -394,12 +358,14 @@ func (t *ConnTracker) checkDeviceGate(us *userStats, userID int, sourceIP string
 
 	for i := 0; i < limit && i < len(ipList); i++ {
 		if ipList[i] == sourceIP {
-			return false
+			us.ips[sourceIP] = 1
+			us.connCount++
+			return true
 		}
 	}
-	nlog.Core().Debug("device limit: total over limit, rejecting",
+	nlog.Core().Debug("device limit: rejecting",
 		"userID", userID, "ip", sourceIP, "totalIPs", len(allIPs), "limit", limit)
-	return true
+	return false
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -445,79 +411,6 @@ func (t *ConnTracker) ActiveCount() int {
 
 // ─── trackedConn (TCP) ──────────────────────────────────────────────────────
 
-// RateLimitedWriter wraps a Writer with non-blocking rate limiting.
-// Uses AllowN for instant checks and context-aware waiting when needed.
-type RateLimitedWriter struct {
-	writer  io.Writer
-	limiter *rate.Limiter
-	ctx     context.Context
-}
-
-// Write implements io.Writer with rate limiting.
-func (w *RateLimitedWriter) Write(b []byte) (int, error) {
-	// Truncate to burst size
-	if burst := w.limiter.Burst(); len(b) > burst {
-		b = b[:burst]
-	}
-
-	// Fast path: check if tokens available (non-blocking)
-	if w.limiter.AllowN(time.Now(), len(b)) {
-		return w.writer.Write(b)
-	}
-
-	// Slow path: wait for tokens with context cancellation support
-	resv := w.limiter.ReserveN(time.Now(), len(b))
-	if delay := resv.Delay(); delay > 0 {
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			// Tokens available, proceed
-		case <-w.ctx.Done():
-			resv.Cancel()
-			return 0, w.ctx.Err()
-		}
-	}
-
-	return w.writer.Write(b)
-}
-
-// RateLimitedReadCloser wraps a Reader with non-blocking rate limiting.
-type RateLimitedReadCloser struct {
-	reader  io.Reader
-	limiter *rate.Limiter
-	ctx     context.Context
-}
-
-// Read implements io.Reader with rate limiting.
-func (r *RateLimitedReadCloser) Read(b []byte) (int, error) {
-	// Truncate to burst size
-	if burst := r.limiter.Burst(); len(b) > burst {
-		b = b[:burst]
-	}
-
-	n, err := r.reader.Read(b)
-	if n > 0 && r.limiter != nil {
-		// Fast path: check if tokens available
-		if !r.limiter.AllowN(time.Now(), n) {
-			// Slow path: wait with context cancellation
-			resv := r.limiter.ReserveN(time.Now(), n)
-			if delay := resv.Delay(); delay > 0 {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					// Tokens available
-				case <-r.ctx.Done():
-					resv.Cancel()
-					return n, r.ctx.Err()
-				}
-			}
-		}
-	}
-	return n, err
-}
-
 type trackedConn struct {
 	net.Conn
 	tracker  *ConnTracker
@@ -527,6 +420,41 @@ type trackedConn struct {
 	limiter  *rate.Limiter
 	ctx      context.Context
 	closed   atomic.Bool
+}
+
+// waitLimit blocks until n tokens are available or ctx is done. Requests
+// larger than the burst are split into burst-sized chunks: one ReserveN(n)
+// with n > burst yields an infinite delay and would stall the connection
+// until it is cancelled.
+func waitLimit(ctx context.Context, lim *rate.Limiter, n int) error {
+	if lim == nil || n <= 0 {
+		return nil
+	}
+	burst := lim.Burst()
+	if burst <= 0 {
+		return nil
+	}
+	for n > 0 {
+		chunk := n
+		if chunk > burst {
+			chunk = burst
+		}
+		if !lim.AllowN(time.Now(), chunk) {
+			resv := lim.ReserveN(time.Now(), chunk)
+			if delay := resv.Delay(); delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					resv.Cancel()
+					return ctx.Err()
+				}
+			}
+		}
+		n -= chunk
+	}
+	return nil
 }
 
 func (c *trackedConn) Read(b []byte) (int, error) {
@@ -541,54 +469,51 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 			c.us.upload.Add(int64(n)) // 从入站读取 = 用户上传
 		}
 		if c.limiter != nil {
-			// Non-blocking rate limiting
-			if !c.limiter.AllowN(time.Now(), n) {
-				resv := c.limiter.ReserveN(time.Now(), n)
-				if delay := resv.Delay(); delay > 0 {
-					timer := time.NewTimer(delay)
-					defer timer.Stop()
-					select {
-					case <-timer.C:
-						// Tokens available
-					case <-c.ctx.Done():
-						resv.Cancel()
-						return n, c.ctx.Err()
-					}
-				}
+			if werr := waitLimit(c.ctx, c.limiter, n); werr != nil {
+				return n, werr
 			}
 		}
 	}
 	return n, err
 }
 
+// Write rate-limits and writes the whole buffer. The previous version cut b
+// to the bucket burst and returned a short count with a nil error, which
+// io.Writer callers treat as a complete write — the tail was silently lost.
 func (c *trackedConn) Write(b []byte) (int, error) {
-	// Apply rate limiting before write
-	if c.limiter != nil {
-		if burst := c.limiter.Burst(); len(b) > burst {
-			b = b[:burst]
+	if c.limiter == nil {
+		n, err := c.Conn.Write(b)
+		if n > 0 && c.us != nil {
+			c.us.download.Add(int64(n)) // 向入站写入 = 用户下载
 		}
-		// Non-blocking check first
-		if !c.limiter.AllowN(time.Now(), len(b)) {
-			resv := c.limiter.ReserveN(time.Now(), len(b))
-			if delay := resv.Delay(); delay > 0 {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					// Tokens available
-				case <-c.ctx.Done():
-					resv.Cancel()
-					return 0, c.ctx.Err()
-				}
-			}
-		}
+		return n, err
 	}
 
-	n, err := c.Conn.Write(b)
-	if n > 0 && c.us != nil {
-		c.us.download.Add(int64(n)) // 向入站写入 = 用户下载
+	written := 0
+	for len(b) > 0 {
+		chunk := len(b)
+		if burst := c.limiter.Burst(); burst > 0 && chunk > burst {
+			chunk = burst
+		}
+		if err := waitLimit(c.ctx, c.limiter, chunk); err != nil {
+			return written, err
+		}
+		n, err := c.Conn.Write(b[:chunk])
+		if n > 0 {
+			written += n
+			b = b[n:]
+			if c.us != nil {
+				c.us.download.Add(int64(n)) // 向入站写入 = 用户下载
+			}
+		}
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
 	}
-	return n, err
+	return written, nil
 }
 
 func (c *trackedConn) Close() error {
@@ -603,25 +528,12 @@ func (c *trackedConn) Close() error {
 // makeCountFunc builds a CountFunc for zero-copy byte counting via sing's
 // ReadCounter/WriteCounter unwrap interfaces.
 func (c *trackedConn) makeCountFunc(counter *atomic.Int64) N.CountFunc {
-	if c.limiter == nil {
+	if c.limiter == nil || c.ctx == nil {
 		return func(n int64) { counter.Add(n) }
 	}
 	return func(n int64) {
 		counter.Add(n)
-		// Non-blocking rate limiting with context cancellation
-		if !c.limiter.AllowN(time.Now(), int(n)) {
-			resv := c.limiter.ReserveN(time.Now(), int(n))
-			if delay := resv.Delay(); delay > 0 {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					// Tokens available
-				case <-c.ctx.Done():
-					resv.Cancel()
-				}
-			}
-		}
+		_ = waitLimit(c.ctx, c.limiter, int(n))
 	}
 }
 
@@ -664,20 +576,8 @@ func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (singM.Socksaddr, err
 			c.us.upload.Add(n) // 从入站读取 = 用户上传
 		}
 		if c.limiter != nil {
-			// Non-blocking rate limiting with context cancellation
-			if !c.limiter.AllowN(time.Now(), int(n)) {
-				resv := c.limiter.ReserveN(time.Now(), int(n))
-				if delay := resv.Delay(); delay > 0 {
-					timer := time.NewTimer(delay)
-					defer timer.Stop()
-					select {
-					case <-timer.C:
-						// Tokens available
-					case <-c.ctx.Done():
-						resv.Cancel()
-						return dest, c.ctx.Err()
-					}
-				}
+			if werr := waitLimit(c.ctx, c.limiter, int(n)); werr != nil {
+				return dest, werr
 			}
 		}
 	}
@@ -689,19 +589,8 @@ func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, dest singM.Socksaddr
 
 	// Apply rate limiting before write
 	if c.limiter != nil {
-		if !c.limiter.AllowN(time.Now(), int(n)) {
-			resv := c.limiter.ReserveN(time.Now(), int(n))
-			if delay := resv.Delay(); delay > 0 {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					// Tokens available
-				case <-c.ctx.Done():
-					resv.Cancel()
-					return c.ctx.Err()
-				}
-			}
+		if err := waitLimit(c.ctx, c.limiter, int(n)); err != nil {
+			return err
 		}
 	}
 
@@ -722,25 +611,12 @@ func (c *trackedPacketConn) Close() error {
 }
 
 func (c *trackedPacketConn) makeCountFunc(counter *atomic.Int64) N.CountFunc {
-	if c.limiter == nil {
+	if c.limiter == nil || c.ctx == nil {
 		return func(n int64) { counter.Add(n) }
 	}
 	return func(n int64) {
 		counter.Add(n)
-		// Non-blocking rate limiting with context cancellation
-		if !c.limiter.AllowN(time.Now(), int(n)) {
-			resv := c.limiter.ReserveN(time.Now(), int(n))
-			if delay := resv.Delay(); delay > 0 {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					// Tokens available
-				case <-c.ctx.Done():
-					resv.Cancel()
-				}
-			}
-		}
+		_ = waitLimit(c.ctx, c.limiter, int(n))
 	}
 }
 

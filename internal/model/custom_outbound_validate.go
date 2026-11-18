@@ -8,10 +8,6 @@ import (
 	ob "github.com/cedar2025/xboard-node/internal/outbound"
 )
 
-func ValidateCustomOutbounds(outbounds []OutboundConfig) error {
-	return ValidateCustomOutboundsForKernel(outbounds, "", nil)
-}
-
 func ValidateCustomOutboundsForKernel(outbounds []OutboundConfig, kernelType string, additionalTags []string) error {
 	if len(outbounds) == 0 {
 		return nil

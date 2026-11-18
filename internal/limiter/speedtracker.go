@@ -128,9 +128,6 @@ func (t *SpeedTracker) GetLimiter(user string) *rate.Limiter {
 	if burst < 64*1024 {
 		burst = 64 * 1024
 	}
-	if cap4s := bytesPerSec * 4; cap4s > 64*1024 && burst > cap4s {
-		burst = cap4s
-	}
 
 	lim := rate.NewLimiter(rate.Limit(bytesPerSec), burst)
 

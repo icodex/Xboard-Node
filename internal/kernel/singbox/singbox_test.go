@@ -140,17 +140,39 @@ func TestConnTrackerCheckDeviceGateMergesFreshGlobalDevices(t *testing.T) {
 	us.addConn("1.1.1.1")
 	tracker.UpdateGlobalDevices(map[int][]string{1: {"9.9.9.9"}})
 
-	if tracker.checkDeviceGate(us, 1, "2.2.2.2", 2) {
+	if !tracker.admitConnection(us, 1, "2.2.2.2", 2) {
 		t.Fatal("expected lexicographically earlier candidate to remain allowed")
 	}
-	if !tracker.checkDeviceGate(us, 1, "99.99.99.99", 2) {
+	if tracker.admitConnection(us, 1, "99.99.99.99", 2) {
 		t.Fatal("expected merged local+global device state to reject lexicographically later third device")
 	}
-	if tracker.checkDeviceGate(us, 1, "1.1.1.1", 2) {
+	if !tracker.admitConnection(us, 1, "1.1.1.1", 2) {
 		t.Fatal("existing local IP should still be allowed")
 	}
-	if tracker.checkDeviceGate(us, 1, "9.9.9.9", 2) {
+	if !tracker.admitConnection(us, 1, "9.9.9.9", 2) {
 		t.Fatal("existing global IP should still be allowed")
+	}
+}
+
+// A rejected admission must leave the counters untouched. This is the state
+// invariant the single check-and-register critical section guarantees: the
+// old split version could admit (and count) a connection that the check had
+// already decided to reject.
+func TestConnTrackerRejectedAdmissionLeavesStateUnchanged(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMap(map[string]int{"uuid-1": 1})
+	us := tracker.users[1]
+	us.addConn("1.1.1.1")
+	us.addConn("2.2.2.2")
+
+	if tracker.admitConnection(us, 1, "9.9.9.9", 2) {
+		t.Fatal("expected the third device to be rejected")
+	}
+	us.mu.Lock()
+	distinct, conns := len(us.ips), us.connCount
+	us.mu.Unlock()
+	if distinct != 2 || conns != 2 {
+		t.Fatalf("rejected admission mutated state: distinct=%d connCount=%d, want 2/2", distinct, conns)
 	}
 }
 
@@ -213,5 +235,25 @@ func TestConnTrackerRateLimitHonorsContextCancellation(t *testing.T) {
 	cancelWrite()
 	if n, err := writeTracked.Write([]byte("a")); !errors.Is(err, context.Canceled) || n != 0 {
 		t.Fatalf("second Write() = (%d, %v), want (0, context canceled)", n, err)
+	}
+}
+
+// Sequential admissions must respect the limit too: the lexicographic rule
+// used to admit a lower-sorting newcomer after the limit was already reached.
+func TestConnTrackerDeviceLimitRejectsLowerSortingNewIP(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMap(map[string]int{"uuid-1": 1})
+	us := tracker.users[1]
+	us.addConn("9.9.9.9")
+	us.addConn("8.8.8.8")
+
+	if tracker.admitConnection(us, 1, "1.1.1.1", 2) {
+		t.Fatal("a third device must be rejected even though its IP sorts lower")
+	}
+	us.mu.Lock()
+	distinct := len(us.ips)
+	us.mu.Unlock()
+	if distinct != 2 {
+		t.Fatalf("distinct IPs = %d, want 2", distinct)
 	}
 }

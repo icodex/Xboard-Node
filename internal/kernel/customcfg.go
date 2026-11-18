@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
@@ -106,5 +107,6 @@ func mapKeys(m map[string]any) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return keys
 }

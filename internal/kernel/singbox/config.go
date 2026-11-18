@@ -2,7 +2,6 @@ package singbox
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -106,21 +105,6 @@ func outboundConfigToSingbox(oc model.OutboundConfig) (M, error) {
 	return canonical.RenderSingbox(oc.Tag)
 }
 
-// structuredRawToCustomRule decodes a structured match/action raw entry into
-// the model rule the compiler consumes. Field names match case-insensitively
-// (encoding/json), mirroring the panel's custom_route_rules shape.
-func structuredRawToCustomRule(rule map[string]any) (model.CustomRouteRule, error) {
-	var parsed model.CustomRouteRule
-	data, err := json.Marshal(rule)
-	if err != nil {
-		return parsed, err
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return parsed, err
-	}
-	return parsed, nil
-}
-
 func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteRule, panelRaw []map[string]any, staticRaw []map[string]any) (M, error) {
 	var rules []M
 
@@ -141,7 +125,7 @@ func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteR
 	for _, cr := range panelRaw {
 		switch {
 		case xr.IsStructuredRule(cr):
-			parsed, err := structuredRawToCustomRule(cr)
+			parsed, err := kernel.DecodeCustomRouteRule(cr)
 			if err != nil {
 				nlog.Core().Error("skipping unparseable structured custom route", "error", err)
 				continue
@@ -544,22 +528,11 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	return base
 }
 
-type ss2022Config struct {
-	method string
-	size   int
-}
-
-var ss2022Methods = map[string]ss2022Config{
-	"2022-blake3-aes-128-gcm":       {"2022-blake3-aes-128-gcm", 16},
-	"2022-blake3-aes-256-gcm":       {"2022-blake3-aes-256-gcm", 32},
-	"2022-blake3-chacha20-poly1305": {"2022-blake3-chacha20-poly1305", 32},
-}
-
 func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	base["type"] = "shadowsocks"
 	base["method"] = nc.Cipher
 
-	ss2022, isSS2022 := ss2022Methods[nc.Cipher]
+	ss2022, isSS2022 := kernel.SS2022Methods[nc.Cipher]
 
 	// sing-shadowsocks server-side iPSK (the users[] form built below) only
 	// implements the blake3-aes methods; the chacha20 variant fails inbound
@@ -577,7 +550,7 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	userList := make([]M, len(users))
 	var rawBuf []byte
 	if isSS2022 {
-		rawBuf = make([]byte, ss2022.size)
+		rawBuf = make([]byte, ss2022.Size)
 	}
 
 	for i := range users {

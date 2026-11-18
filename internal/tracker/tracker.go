@@ -53,7 +53,11 @@ type Tracker struct {
 	live atomic.Pointer[snapshot]
 
 	// lastAliveIPsHash detects changes to avoid duplicate reports.
-	lastAliveIPsHash string
+	// Keyed by consumer: the traffic report and the WS device report are
+	// separate panel channels, so a single shared cursor lets whichever flush
+	// runs first swallow the update for the other (the device snapshot can
+	// then be skipped until the IP set changes again).
+	aliveHashes map[string]string
 
 	// lastProcess is the wall-clock time of the previous Process call.
 	// Protected by mu — only written by Process.
@@ -64,6 +68,7 @@ func New() *Tracker {
 	t := &Tracker{
 		lastSeen:       make(map[int][2]int64),
 		pendingTraffic: make(map[int][2]int64),
+		aliveHashes:    make(map[string]string),
 	}
 	// Publish initial empty snapshot.
 	t.live.Store(&snapshot{
@@ -174,9 +179,17 @@ func (t *Tracker) HasTraffic() bool {
 	return len(t.pendingTraffic) > 0
 }
 
+// Alive-IP snapshot consumers. Each keeps its own change cursor so neither
+// starves the other.
+const (
+	ConsumerReport  = "report"
+	ConsumerDevices = "devices"
+)
+
 // FlushAliveIPs returns per-user alive IPs as a fresh copy safe for
-// asynchronous marshalling. Returns nil if unchanged since the last flush.
-func (t *Tracker) FlushAliveIPs() map[int][]string {
+// asynchronous marshalling. Returns nil if unchanged since the last flush
+// by this consumer.
+func (t *Tracker) FlushAliveIPs(consumer string) map[int][]string {
 	s := t.live.Load()
 
 	t.mu.Lock()
@@ -186,11 +199,11 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 	currentHash := calcAliveIPsHash(s.aliveIPs)
 
 	// If no changes, return nil to avoid duplicate reporting
-	if currentHash == t.lastAliveIPsHash {
+	if currentHash == t.aliveHashes[consumer] {
 		return nil
 	}
 
-	t.lastAliveIPsHash = currentHash
+	t.aliveHashes[consumer] = currentHash
 
 	out := make(map[int][]string, len(s.aliveIPs))
 	for uid, ips := range s.aliveIPs {
@@ -203,11 +216,12 @@ func (t *Tracker) FlushAliveIPs() map[int][]string {
 	return out
 }
 
-// MarkAliveIPsStale forces the next FlushAliveIPs to resend the snapshot even
-// if unchanged. Used when a push to the panel failed and the data was lost.
+// MarkAliveIPsStale forces the next FlushAliveIPs to resend the snapshot to
+// every consumer, even if unchanged. Used when a push to the panel failed and
+// the data was lost.
 func (t *Tracker) MarkAliveIPsStale() {
 	t.mu.Lock()
-	t.lastAliveIPsHash = ""
+	t.aliveHashes = make(map[string]string)
 	t.mu.Unlock()
 }
 

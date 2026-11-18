@@ -602,11 +602,11 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 	case "shadowsocks":
 		if strings.HasPrefix(nc.Cipher, "2022-blake3-") {
 			// 2022-blake3 multi-user mode
-			cfg, ok := ss2022Methods[nc.Cipher]
+			cfg, ok := kernel.SS2022Methods[nc.Cipher]
 			if !ok {
 				return nil, fmt.Errorf("unsupported ss2022 method: %s", nc.Cipher)
 			}
-			rawBuf := make([]byte, cfg.size)
+			rawBuf := make([]byte, cfg.Size)
 			copy(rawBuf, u.UUID)
 			mu.Account = &ss2022.MemoryAccount{Key: rawBuf}
 		} else {
@@ -665,7 +665,7 @@ func hexEncode(dst, src []byte) {
 
 // ensureGeoData downloads geo databases when routes reference geoip/geosite.
 func (x *Xray) ensureGeoData(nc *model.NodeSpec) {
-	needIP, needSite := kernel.NeedsGeoIP(nc.Routes), kernel.NeedsGeoSite(nc.Routes)
+	needIP, needSite := kernel.NeedsGeoIPForNode(nc), kernel.NeedsGeoSiteForNode(nc)
 	if !needIP && !needSite {
 		return
 	}

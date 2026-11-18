@@ -191,6 +191,12 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 	if err != nil {
 		return fmt.Errorf("build config: %w", err)
 	}
+	// Mirror Start: a config without inbounds means the protocol is not
+	// supported by this kernel. Reload would otherwise report success while
+	// the old listener quietly keeps running.
+	if inbounds, _ := cfgMap["inbounds"].([]M); len(inbounds) == 0 {
+		return fmt.Errorf("protocol %q produced no inbound (unsupported by kernel); refusing reload", nodeConfig.Protocol)
+	}
 	data, err := json.Marshal(cfgMap)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -279,53 +285,67 @@ func (s *SingBox) applyInboundUsers(opts option.Options, im adapter.InboundManag
 }
 
 // tryUpdateInboundUsers attempts the protocol-specific hot user update.
-// Reports whether the inbound was updated in place.
+// Reports whether the inbound was actually updated in place: a matched
+// interface whose options type disagrees must return false so the caller
+// recreates the inbound instead of silently keeping the old user set.
 func tryUpdateInboundUsers(existing adapter.Inbound, inb option.Inbound) bool {
 	var err error
+	matched := false
 	switch v := existing.(type) {
 	case adapter.UpdatableInbound[option.VMessUser]:
 		if opts, ok := inb.Options.(*option.VMessInboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[option.VLESSUser]:
 		if opts, ok := inb.Options.(*option.VLESSInboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[option.TrojanUser]:
 		if opts, ok := inb.Options.(*option.TrojanInboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[option.Hysteria2User]:
 		if opts, ok := inb.Options.(*option.Hysteria2InboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableShadowsocksInbound:
 		if opts, ok := inb.Options.(*option.ShadowsocksInboundOptions); ok {
 			err = v.UpdateUsersByOptions(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[option.TUICUser]:
 		if opts, ok := inb.Options.(*option.TUICInboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[option.AnyTLSUser]:
 		if opts, ok := inb.Options.(*option.AnyTLSInboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[option.MieruUser]:
 		if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	case adapter.UpdatableInbound[auth.User]:
 		switch opts := inb.Options.(type) {
 		case *option.NaiveInboundOptions:
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		case *option.SocksInboundOptions:
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		case *option.HTTPMixedInboundOptions:
 			err = v.UpdateUsers(opts.Users)
+			matched = true
 		}
 	}
-	return err == nil
+	return matched && err == nil
 }
 
 // registerTracker wires the ConnTracker to the current Router exactly once.

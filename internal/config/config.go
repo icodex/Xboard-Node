@@ -793,7 +793,10 @@ func (c *Config) ExpandNodes() []*Config {
 		nodeCfg.Panel.NodeID = entry.NodeID
 		nodeCfg.Panel.NodeType = entry.NodeType
 
-		// Per-node kernel overrides
+		// Per-node kernel overrides. config_dir is derived unless explicitly
+		// set, even when the entry only overrides e.g. log_level: otherwise
+		// every such node shares the base dir and ValidateStartupLayout aborts
+		// the whole daemon at startup.
 		if entry.Kernel != nil {
 			if entry.Kernel.ConfigDir != "" {
 				nodeCfg.Kernel.ConfigDir = entry.Kernel.ConfigDir
@@ -802,6 +805,8 @@ func (c *Config) ExpandNodes() []*Config {
 					// the new ConfigDir unless the user set it explicitly.
 					nodeCfg.Kernel.GeoDataDir = entry.Kernel.ConfigDir
 				}
+			} else {
+				nodeCfg.Kernel.ConfigDir = fmt.Sprintf("%s/node-%d", c.Kernel.ConfigDir, entry.NodeID)
 			}
 			if entry.Kernel.GeoDataDir != "" {
 				nodeCfg.Kernel.GeoDataDir = entry.Kernel.GeoDataDir
@@ -815,10 +820,10 @@ func (c *Config) ExpandNodes() []*Config {
 		} else {
 			// Auto-derive a unique config_dir per node to avoid conflicts.
 			nodeCfg.Kernel.ConfigDir = fmt.Sprintf("%s/node-%d", c.Kernel.ConfigDir, entry.NodeID)
-			if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
-				// Share the geo data dir with the base dir to avoid re-downloading.
-				nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
-			}
+		}
+		if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
+			// Share the geo data dir with the base dir to avoid re-downloading.
+			nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
 		}
 
 		// Per-node cert overrides

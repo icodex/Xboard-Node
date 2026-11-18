@@ -158,6 +158,17 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		}
 
 		errCh := make(chan error, len(instances))
+		// One instance can expand into many nodes, so the buffer above may be
+		// smaller than the number of goroutines that can fail. A blocking send
+		// would wedge those goroutines (and the waits below) forever; the error
+		// is already logged at the call site, so dropping extras is safe.
+		reportErr := func(err error) {
+			select {
+			case errCh <- err:
+			default:
+			}
+			cancel()
+		}
 		doneCh := make(chan struct{})
 		var wg sync.WaitGroup
 		for _, instanceCfg := range instances {
@@ -170,8 +181,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 					orch := machine.New(instanceCfg)
 					if err := orch.Run(ctx); err != nil {
 						nlog.Core().Error("machine instance exited with error", "instance", instanceCfg.InstanceID, "error", err)
-						errCh <- err
-						cancel()
+						reportErr(err)
 					}
 					return
 				}
@@ -197,8 +207,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 						svc := service.New(nodeCfg)
 						if err := svc.Run(ctx); err != nil {
 							nlog.Core().Error("node service exited with error", "instance", nodeCfg.InstanceID, "node_id", nodeCfg.Panel.NodeID, "error", err)
-							errCh <- err
-							cancel()
+							reportErr(err)
 						}
 					}(idx)
 				}

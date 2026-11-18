@@ -62,6 +62,7 @@ type Service struct {
 	lastConfigHash string     // hash of full config for change detection
 	pullBackoff    apiBackoff // backoff for panel pull failures
 	pushBackoff    apiBackoff // backoff for panel push failures
+	startBackoff   apiBackoff // backoff for periodic kernel start retries
 
 	// pushActive prevents overlapping push/pull goroutines.
 	pushActive atomic.Bool
@@ -83,6 +84,30 @@ type Service struct {
 
 	// metricsMu: lastUsers, lastConfig, wsClient, wsDisconnectAt (buildMetrics vs main loop).
 	metricsMu sync.RWMutex
+
+	// Certificate reconfiguration runs off the main loop: ACME issuance
+	// (HTTP-01/DNS-01) can take minutes and must not stall reports, tracking
+	// or config handling. certUpdates delivers the result back to the loop.
+	certUpdates chan certUpdate
+	certMu      sync.Mutex
+	certBusy    bool
+	certPending *config.CertConfig
+
+	// certWorkers counts running certificate reconfigurations. Kernel loads
+	// are deferred while it is non-zero, so a config+cert push causes one
+	// reload (with the new cert) instead of two. A counter rather than a bool:
+	// a second worker can start before the first one's update reaches the main
+	// loop, and a bool was cleared too early in that window.
+	certWorkers    atomic.Int32
+	configDeferred atomic.Bool
+}
+
+// certUpdate carries an applied certificate configuration back to the main
+// loop (which owns s.cfg).
+type certUpdate struct {
+	cfg     config.CertConfig
+	changed bool
+	ok      bool
 }
 
 // pullResult carries the outcome of an async pullViaAPI back to the main goroutine.
@@ -160,6 +185,7 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsEvents:     make(chan controlplane.Event, 16),
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
+		certUpdates:  make(chan certUpdate, 1),
 	}
 	// kernel.type auto defers kernel construction until the first node spec
 	// arrives; concrete types build immediately (behaviour unchanged).
@@ -277,6 +303,7 @@ func (s *Service) Run(ctx context.Context) error {
 			return nil
 
 		case <-trackTicker.C:
+			s.retryKernel()
 			s.trackAndEnforce(ctx)
 
 		case <-reportTicker.C:
@@ -284,6 +311,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 		case <-deviceReportTicker.C:
 			s.reportDevices()
+
+		case upd := <-s.certUpdates:
+			// The worker finished an off-loop certificate reconfiguration.
+			// Its counter is decremented by the worker itself.
+			deferred := s.configDeferred.Swap(false)
+			if upd.ok {
+				s.cfg.Cert = upd.cfg
+			}
+			if upd.changed || deferred {
+				s.applyChanges(ctx, true, false)
+			}
 
 		case <-pullTicker.C:
 			// When WebSocket is connected, skip REST polling entirely.
@@ -381,7 +419,7 @@ func (s *Service) initialSetup(ctx context.Context) error {
 		return nil
 	}
 
-	s.applyRemoteOverrides(ctx, bootstrap.Config)
+	s.applyRemoteOverrides(ctx, bootstrap.Config, true)
 	if !s.startKernel(bootstrap.Config, bootstrap.Users) {
 		return fmt.Errorf("start kernel")
 	}
@@ -390,8 +428,10 @@ func (s *Service) initialSetup(ctx context.Context) error {
 }
 
 // applyRemoteOverrides updates service-level settings (log level, cert config)
-// from the panel's NodeConfig. Returns true if cert paths changed (kernel restart needed).
-func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) bool {
+// from the panel's NodeConfig. syncCert must be true only during startup,
+// before the main loop runs; otherwise ACME issuance happens off-loop.
+// Returns true if cert paths changed synchronously (kernel restart needed).
+func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec, syncCert bool) bool {
 	if nc == nil {
 		return false
 	}
@@ -404,7 +444,7 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) 
 
 	// Certificate configuration from panel (panel-first: takes precedence over local config)
 	if nc.CertConfig != nil {
-		return s.applyNodeCert(ctx, nc.CertConfig)
+		return s.applyNodeCert(ctx, nc.CertConfig, syncCert)
 	}
 
 	// Legacy fields (deprecated: prefer cert_config)
@@ -419,14 +459,21 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) 
 	return false
 }
 
-// applyPanelCert converts a panel CertConfig into the local config format and
-// reconfigures the cert manager. Reports whether cert paths changed.
-func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) bool {
+// applyNodeCert reconfigures the certificate manager. syncCert is true during
+// startup (before the main loop), where blocking is harmless and the kernel
+// must start with the panel certificate. At runtime the work is handed to a
+// background worker so ACME issuance cannot freeze the service loop.
+func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig, syncCert bool) bool {
 	if newCfg == nil {
 		return false
 	}
 	cfgCopy := *newCfg
 	cfgCopy.CertDir = s.cfg.Cert.CertDir
+
+	if !syncCert {
+		s.startCertReconfigure(ctx, cfgCopy)
+		return false
+	}
 
 	changed, err := s.cert.Reconfigure(ctx, cfgCopy)
 	if err != nil {
@@ -443,6 +490,89 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) 
 		}
 	}
 	return changed
+}
+
+// startCertReconfigure serializes certificate reconfiguration in a background
+// goroutine. A config arriving while one run is in flight replaces the pending
+// one (latest wins); the running ACME attempt is not interrupted.
+func (s *Service) startCertReconfigure(ctx context.Context, cfg config.CertConfig) {
+	s.certMu.Lock()
+	if s.certBusy {
+		s.certPending = &cfg
+		s.certMu.Unlock()
+		nlog.Core().Info("cert: reconfigure already running, queued latest config")
+		return
+	}
+	s.certBusy = true
+	s.certWorkers.Add(1)
+	s.certMu.Unlock()
+	go s.runCertReconfigure(ctx, cfg)
+}
+
+// certRetryMax bounds how many times a failed runtime certificate
+// reconfiguration is retried before it is dropped. A later panel push still
+// triggers a fresh attempt.
+const certRetryMax = 5
+
+func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig) {
+	defer s.certWorkers.Add(-1)
+
+	attempt := 0
+	changedAny := false
+	okAny := false
+	applied := cfg
+
+	for {
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		changed, err := s.cert.Reconfigure(rctx, cfg)
+		cancel()
+		if err == nil {
+			attempt = 0
+			okAny = true
+			changedAny = changedAny || changed
+			applied = cfg
+		} else {
+			attempt++
+			nlog.Core().Error("failed to apply runtime cert config",
+				"mode", cfg.CertMode, "attempt", attempt, "error", err)
+		}
+
+		s.certMu.Lock()
+		next := s.certPending
+		s.certPending = nil
+		if next != nil {
+			// A newer panel config always wins over retrying the failed one.
+			cfg = *next
+			attempt = 0
+			s.certMu.Unlock()
+			continue
+		}
+		if err != nil && attempt < certRetryMax {
+			s.certMu.Unlock()
+			// Exponential backoff: 2s, 4s, 8s, 16s.
+			timer := time.NewTimer(time.Duration(1<<attempt) * time.Second)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				s.certMu.Lock()
+				s.certBusy = false
+				s.certMu.Unlock()
+				return
+			}
+			continue
+		}
+		s.certBusy = false
+		s.certMu.Unlock()
+
+		// Report once, after every queued config is handled, so the main loop
+		// reloads a single time with the final certificate material.
+		select {
+		case s.certUpdates <- certUpdate{cfg: applied, changed: changedAny, ok: okAny}:
+		case <-ctx.Done():
+		}
+		return
+	}
 }
 
 // startWSClient starts the push client goroutine if a client is configured.
@@ -627,14 +757,14 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		}
 		// Initialize nodeLog on first config
 		if s.nodeLog == nil {
-			s.nodeLog = nlog.ForNode(event.Config.Protocol, event.Config.ServerPort)
+			s.nodeLog = nlog.ForNode(nodeDisplayProtocol(event.Config), event.Config.ServerPort)
 		}
 		s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(event.Users)))
 		s.metricsMu.Lock()
 		s.lastConfig = event.Config
 		s.metricsMu.Unlock()
 		s.lastConfigHash = newConfigHash
-		s.applyRemoteOverrides(ctx, event.Config)
+		s.applyRemoteOverrides(ctx, event.Config, false)
 		s.applyChanges(ctx, true, false)
 
 	case controlplane.EventSyncUsers:
@@ -648,13 +778,9 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if s.nodeLog != nil {
 			s.nodeLog.Info(fmt.Sprintf("users updated, %d users", len(event.Users)))
 		}
-		// Pure-WS bootstrap: when the handshake returns no REST snapshot
-		// (WS enabled), lastUsers is only ever seeded by REST pulls, which are
-		// skipped while the WS is connected - the kernel could never start.
-		// Seed the desired state before the running check.
-		if !s.kernel.IsRunning() {
-			s.updateUserState(event.Users)
-		}
+		// Pure-WS bootstrap: when the handshake returns no REST snapshot (WS
+		// enabled), REST pulls are skipped while the WS is connected. The
+		// update must seed lastUsers itself or the kernel never starts.
 		s.applyUserUpdate(ctx, event.Users, newHash)
 
 	case controlplane.EventSyncUserDelta:
@@ -747,14 +873,14 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 			configChanged = true
 			// Initialize or update node logger
 			if s.nodeLog == nil {
-				s.nodeLog = nlog.ForNode(result.config.Protocol, result.config.ServerPort)
+				s.nodeLog = nlog.ForNode(nodeDisplayProtocol(result.config), result.config.ServerPort)
 			}
 			s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
 			s.metricsMu.Lock()
 			s.lastConfig = result.config
 			s.metricsMu.Unlock()
 			s.lastConfigHash = result.configHash
-			if s.applyRemoteOverrides(ctx, result.config) {
+			if s.applyRemoteOverrides(ctx, result.config, false) {
 				configChanged = true
 			}
 		}
@@ -816,20 +942,43 @@ func (s *Service) restoreUserState(users []model.UserSpec, hash string) {
 	s.lastUserHash = hash
 }
 
+// nodeDisplayProtocol is the protocol name used in log prefixes. Hysteria v1
+// and v2 share the protocol field and are told apart by Version.
+func nodeDisplayProtocol(nc *model.NodeSpec) string {
+	if nc == nil {
+		return ""
+	}
+	if nc.Protocol == "hysteria" && nc.Version == 2 {
+		return "hysteria2"
+	}
+	return nc.Protocol
+}
+
 // startKernel starts (or restarts) the kernel with the given config/users and
 // records the successfully applied state. Returns false on error.
 func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
 		nlog.Core().Error("failed to start kernel", "error", err)
+		// A transient failure (EADDRINUSE during a reload, cert not readable
+		// yet) must not be cached as "applied": the next identical sync would
+		// otherwise be deduped by the hash checks and the node would stay down
+		// until the config changed or the process restarted.
+		s.lastConfigHash = ""
+		s.lastUserHash = ""
 		return false
 	}
+
+	// A successful start (including one triggered by an explicit panel event)
+	// clears the periodic-retry backoff, so a later failure starts retrying
+	// immediately instead of inheriting an old skip count.
+	s.startBackoff.onSuccess()
 
 	s.appliedState.Config = nc
 	s.appliedState.Users = users
 
 	// Initialize node logger on first successful start
 	if s.nodeLog == nil {
-		s.nodeLog = nlog.ForNode(nc.Protocol, nc.ServerPort)
+		s.nodeLog = nlog.ForNode(nodeDisplayProtocol(nc), nc.ServerPort)
 	}
 	s.probeOutboundsAsync(nc)
 	s.speedTracker.SetLogCallback(func(msg string) {
@@ -842,6 +991,7 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 
 // ensureRunning starts the kernel if it is not running and there are users +
 // config available. Returns true if the kernel is running afterwards.
+// Used by explicit panel events, which are infrequent enough to retry at once.
 func (s *Service) ensureRunning() bool {
 	if s.kernel.IsRunning() {
 		return true
@@ -852,12 +1002,38 @@ func (s *Service) ensureRunning() bool {
 	return false
 }
 
+// retryKernel is the periodic fallback for a kernel that failed to start and
+// then received no new panel sync (WS connected, identical hashes, REST ETag
+// 304). Backoff keeps a permanently broken config from rebuilding every tick.
+func (s *Service) retryKernel() {
+	if s.kernel.IsRunning() || len(s.lastUsers) == 0 || s.lastConfig == nil {
+		return
+	}
+	if s.startBackoff.shouldSkip() {
+		return
+	}
+	if s.startKernel(s.lastConfig, s.lastUsers) {
+		s.startBackoff.onSuccess()
+		return
+	}
+	s.startBackoff.onFailure()
+}
+
 // ─── User update entry points ───────────────────────────────────────────────
 
 // applyUserUpdate replaces the full user set and hot-swaps the kernel.
 // Called from WS sync.users and REST polling.
 func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash string) {
-	if !s.ensureRunning() {
+	if !s.kernel.IsRunning() {
+		// No kernel yet (config-only bootstrap, or the panel had no users when
+		// the node started). Persist the desired state and start from it:
+		// returning early would drop the users forever, because the panel's
+		// ETag no longer changes and later polls return 304.
+		s.updateUserState(users)
+		if newHash != "" {
+			s.lastUserHash = newHash
+		}
+		s.ensureRunning()
 		return
 	}
 
@@ -889,16 +1065,22 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 		merged := mergeUsers(s.lastUsers, deltaUsers)
 
-		if !s.ensureRunning() {
+		if !s.kernel.IsRunning() {
+			s.updateUserState(merged)
+			s.ensureRunning()
 			return
 		}
 
+		// Index the current users once: the previous nested scan was
+		// O(users × deltas) on the main loop (5M comparisons for a 10k-user
+		// panel and a 500-user batch).
+		prevByID := make(map[int]model.UserSpec, len(s.lastUsers))
+		for _, old := range s.lastUsers {
+			prevByID[old.ID] = old
+		}
 		for _, delta := range deltaUsers {
-			for _, old := range s.lastUsers {
-				if old.ID == delta.ID && old.UUID != delta.UUID {
-					s.kernel.RemoveUsers([]model.UserSpec{old})
-					break
-				}
+			if old, ok := prevByID[delta.ID]; ok && old.UUID != delta.UUID {
+				s.kernel.RemoveUsers([]model.UserSpec{old})
 			}
 		}
 
@@ -924,6 +1106,7 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		filtered := subtractUsers(s.lastUsers, deltaUsers)
 
 		if !s.kernel.IsRunning() {
+			s.updateUserState(filtered)
 			return
 		}
 
@@ -996,6 +1179,14 @@ func subtractUsers(base, delta []model.UserSpec) []model.UserSpec {
 // handled by applyUserUpdate/applyUserDelta directly via the atomic user API.
 func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged bool) {
 	if !configChanged {
+		return
+	}
+
+	if s.certWorkers.Load() > 0 {
+		// A certificate reconfiguration is running; wait for the new material
+		// so the kernel loads once. The certUpdates handler replays this.
+		s.configDeferred.Store(true)
+		nlog.Core().Debug("config change deferred until certificate reconfiguration completes")
 		return
 	}
 
@@ -1093,14 +1284,16 @@ func (s *Service) pushReportAsync() {
 	}
 
 	traffic := s.tracker.FlushTraffic()
-	aliveIPs := s.tracker.FlushAliveIPs()
+	aliveIPs := s.tracker.FlushAliveIPs(tracker.ConsumerReport)
 	online := s.tracker.CurrentOnline()
-	status := monitor.Collect()
-	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
 
 	go func() {
 		defer s.pushActive.Store(false)
+		// System stats (procfs/statfs) must not block the main loop that
+		// handles WS events and kernel user updates.
+		status := monitor.Collect()
+		metrics := s.buildMetrics(status)
+		metrics["kernel_status"] = s.kernel.IsRunning()
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 			nlog.Core().Warn("failed to push report", "error", err)
 			if len(traffic) > 0 {
@@ -1125,7 +1318,7 @@ func (s *Service) pushReportSync() {
 		return
 	}
 	traffic := s.tracker.FlushTraffic()
-	aliveIPs := s.tracker.FlushAliveIPs()
+	aliveIPs := s.tracker.FlushAliveIPs(tracker.ConsumerReport)
 	online := s.tracker.CurrentOnline()
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
@@ -1245,7 +1438,7 @@ func (s *Service) sendDeviceBatch() {
 		return
 	}
 
-	devices := s.tracker.FlushAliveIPs()
+	devices := s.tracker.FlushAliveIPs(tracker.ConsumerDevices)
 	// FlushAliveIPs returns nil if no changes since last flush
 	if devices == nil {
 		nlog.Core().Debug("device snapshot unchanged, skipping")

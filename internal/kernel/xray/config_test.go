@@ -1019,3 +1019,40 @@ func TestBuildInbound_Hysteria2_ALPNOverride(t *testing.T) {
 		t.Errorf("missing alpn should default to h3, got %v", got)
 	}
 }
+
+// Structured suffix values that already carry an xray matcher prefix must not
+// be prefixed again: "domain:geosite:cn" matches nothing.
+func TestCompileCustomRouteRule_PreservesSuffixPrefixes(t *testing.T) {
+	rule := model.CustomRouteRule{
+		Match: model.RouteMatch{
+			Domains:        []string{"full:exact.example"},
+			DomainSuffixes: []string{"geosite:cn", "plain.example", "full:other.example", "regexp:^ads\\."},
+		},
+		Action: model.RouteAction{Type: "direct"},
+	}
+
+	compiled := compileCustomRouteRule(rule)
+	if len(compiled) == 0 {
+		t.Fatal("expected a compiled rule")
+	}
+	domains, ok := compiled[0]["domain"].([]string)
+	if !ok {
+		t.Fatalf("domain matcher = %#v", compiled[0]["domain"])
+	}
+	want := map[string]bool{
+		"full:exact.example":   true,
+		"geosite:cn":           true,
+		"domain:plain.example": true,
+		"full:other.example":   true,
+		"regexp:^ads\\.":       true,
+	}
+	for _, value := range domains {
+		if !want[value] {
+			t.Fatalf("unexpected domain matcher %q (all: %v)", value, domains)
+		}
+		delete(want, value)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing matchers %v (got %v)", want, domains)
+	}
+}

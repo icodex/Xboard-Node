@@ -142,10 +142,21 @@ func (d *LimitDispatcher) DispatchLink(ctx context.Context, dest net.Destination
 		return err
 	}
 
+	if err := d.innerDisp.DispatchLink(ctx, dest, link); err != nil {
+		// Mirror Dispatch: an admission that never got a link must not keep
+		// its device slot or connection count (permanently occupied IP).
+		if email != "" {
+			d.delConn(email, sourceIP)
+		}
+		return err
+	}
+	// Register only after a successful dispatch, matching Dispatch. Wrapping
+	// before the call would make the close callback release the slot a second
+	// time when the failed link is later closed.
 	if email != "" {
 		d.trackLink(link, email, sourceIP)
 	}
-	return d.innerDisp.DispatchLink(ctx, dest, link)
+	return nil
 }
 
 // identifyAndCheck extracts user identity from the session context and enforces
@@ -334,6 +345,14 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 	if globalIPs[sourceIP] {
 		ips[sourceIP]++
 		return false
+	}
+
+	// Local allowance is full: a brand-new IP must be rejected. Without this,
+	// the lexicographic rule admitted a lower-sorting newcomer on top of the
+	// existing IPs (limit 2 with 9.9.9.9 + 8.8.8.8 connected accepted 1.1.1.1
+	// as a third device).
+	if len(ips) >= limit {
+		return true
 	}
 
 	// Merge local and global IP sets; the node's own report echoes back, so

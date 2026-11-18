@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cedar2025/xboard-node/internal/cert"
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -26,6 +27,7 @@ type fakeKernel struct {
 	updateCalls int
 	addCalls    int
 	removeCalls int
+	reloadCalls int
 
 	onUpdateUsers func([]model.UserSpec)
 	onAddUsers    func([]model.UserSpec)
@@ -50,6 +52,7 @@ func (f *fakeKernel) Stop()           { f.running = false }
 func (f *fakeKernel) IsRunning() bool { return f.running }
 func (f *fakeKernel) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	_, _, _ = nodeConfig, users, tls
+	f.reloadCalls++
 	return nil
 }
 func (f *fakeKernel) AddUsers(users []model.UserSpec) (int, error) {
@@ -103,6 +106,7 @@ func newTestService(k *fakeKernel) *Service {
 		limiter:      sharedLimiter,
 		speedTracker: limiter.NewSpeedTracker(sharedLimiter),
 		cert:         cert.NewManager(config.CertConfig{}),
+		certUpdates:  make(chan certUpdate, 1),
 	}
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
@@ -347,5 +351,136 @@ func TestHandleWSEventRejectedConfigKeepsRunningKernel(t *testing.T) {
 	}
 	if s.kernel.Name() != "sing-box" {
 		t.Fatalf("kernel after valid swap = %q, want sing-box", s.kernel.Name())
+	}
+}
+
+// A failed kernel start must not be cached as applied: otherwise the panel's
+// identical syncs (same hashes, REST 304) are deduped and the node stays down
+// until the config changes or the process restarts.
+func TestApplyUserUpdateClearsHashesAndRetriesAfterStartFailure(t *testing.T) {
+	k := &fakeKernel{startErr: errors.New("bind: address already in use")}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+
+	users := []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
+	s.applyUserUpdate(context.Background(), users, computeUserHash(users))
+
+	if k.startCalls != 1 {
+		t.Fatalf("Start calls = %d, want 1", k.startCalls)
+	}
+	if s.lastConfigHash != "" || s.lastUserHash != "" {
+		t.Fatalf("hashes after failed start: config=%q users=%q, want both empty",
+			s.lastConfigHash, s.lastUserHash)
+	}
+	if s.kernel.IsRunning() {
+		t.Fatal("kernel must not be running after a failed start")
+	}
+
+	k.startErr = nil
+	if !s.ensureRunning() {
+		t.Fatal("expected the retry to start the kernel")
+	}
+	if k.startCalls != 2 {
+		t.Fatalf("Start calls after retry = %d, want 2", k.startCalls)
+	}
+	if !s.kernel.IsRunning() {
+		t.Fatal("kernel should be running after a successful retry")
+	}
+}
+
+// The periodic retry backs off instead of rebuilding a broken kernel every tick.
+func TestRetryKernelBacksOff(t *testing.T) {
+	k := &fakeKernel{startErr: errors.New("still broken")}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.updateUserState([]model.UserSpec{{ID: 1, UUID: "uuid-1"}})
+
+	s.retryKernel() // first attempt, fails, backoff = 1
+	if k.startCalls != 1 {
+		t.Fatalf("Start calls = %d, want 1", k.startCalls)
+	}
+	s.retryKernel() // skipped by backoff
+	if k.startCalls != 1 {
+		t.Fatalf("Start calls after backoff tick = %d, want 1", k.startCalls)
+	}
+	s.retryKernel() // backoff consumed, retries
+	if k.startCalls != 2 {
+		t.Fatalf("Start calls after backoff expiry = %d, want 2", k.startCalls)
+	}
+}
+
+// The runtime certificate path runs off the main loop; the result must arrive
+// on certUpdates and the material must be installed. Self mode needs no
+// network, so this exercises the actual worker.
+func TestCertReconfigureRunsOffLoop(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.cfg = &config.Config{}
+	s.cfg.Cert.CertDir = t.TempDir()
+
+	s.applyNodeCert(context.Background(), &config.CertConfig{CertMode: "self", Domain: "example.test"}, false)
+
+	select {
+	case upd := <-s.certUpdates:
+		if !upd.ok {
+			t.Fatal("expected the certificate update to be marked successful")
+		}
+		if upd.cfg.CertMode != "self" {
+			t.Fatalf("cert mode = %q, want self", upd.cfg.CertMode)
+		}
+		if !upd.changed {
+			t.Fatal("expected new material to be reported as changed")
+		}
+		if !s.cert.HasCert() {
+			t.Fatal("expected certificate material to be installed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the cert update")
+	}
+}
+
+// hysteria v1 and v2 share the protocol field; the log prefix must use Version.
+func TestNodeDisplayProtocol(t *testing.T) {
+	tests := []struct {
+		nc   *model.NodeSpec
+		want string
+	}{
+		{&model.NodeSpec{Protocol: "hysteria", Version: 1}, "hysteria"},
+		{&model.NodeSpec{Protocol: "hysteria", Version: 2}, "hysteria2"},
+		{&model.NodeSpec{Protocol: "vless"}, "vless"},
+	}
+	for _, tt := range tests {
+		if got := nodeDisplayProtocol(tt.nc); got != tt.want {
+			t.Errorf("nodeDisplayProtocol(%+v) = %q, want %q", tt.nc, got, tt.want)
+		}
+	}
+}
+
+// While a certificate reconfiguration is running, kernel loads are deferred so
+// the config change lands together with the new material (one reload, not two).
+func TestApplyChangesDefersWhileCertInFlight(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.lastUsers = []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
+
+	s.certWorkers.Add(1)
+	s.applyChanges(context.Background(), true, false)
+	if k.reloadCalls != 0 {
+		t.Fatalf("Reload calls = %d, want 0 while cert is in flight", k.reloadCalls)
+	}
+	if !s.configDeferred.Load() {
+		t.Fatal("config change should be marked deferred")
+	}
+
+	// The cert update handler clears the flag and replays the change.
+	s.certWorkers.Add(-1)
+	deferred := s.configDeferred.Swap(false)
+	if !deferred {
+		t.Fatal("deferred flag should be set")
+	}
+	s.applyChanges(context.Background(), true, false)
+	if k.reloadCalls != 1 {
+		t.Fatalf("Reload calls after cert completed = %d, want 1", k.reloadCalls)
 	}
 }

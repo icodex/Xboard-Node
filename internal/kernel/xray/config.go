@@ -2,7 +2,6 @@ package xray
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -17,20 +16,6 @@ import (
 	xr "github.com/cedar2025/xboard-node/internal/route"
 	"github.com/go-viper/mapstructure/v2"
 )
-
-// structuredRawToCustomRule decodes a structured match/action raw entry into
-// the model rule the compiler consumes (see the singbox builder twin).
-func structuredRawToCustomRule(rule map[string]any) (model.CustomRouteRule, error) {
-	var parsed model.CustomRouteRule
-	data, err := json.Marshal(rule)
-	if err != nil {
-		return parsed, err
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return parsed, err
-	}
-	return parsed, nil
-}
 
 // M is a shorthand for building JSON-like maps
 type M = map[string]interface{}
@@ -389,19 +374,8 @@ func buildTrojan(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
 	return base
 }
 
-type ss2022Config struct {
-	method string
-	size   int
-}
-
-var ss2022Methods = map[string]ss2022Config{
-	"2022-blake3-aes-128-gcm":       {"2022-blake3-aes-128-gcm", 16},
-	"2022-blake3-aes-256-gcm":       {"2022-blake3-aes-256-gcm", 32},
-	"2022-blake3-chacha20-poly1305": {"2022-blake3-chacha20-poly1305", 32},
-}
-
 func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
-	ss2022, isSS2022 := ss2022Methods[nc.Cipher]
+	ss2022, isSS2022 := kernel.SS2022Methods[nc.Cipher]
 
 	clients := make([]M, 0, len(users))
 
@@ -416,7 +390,7 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	if isSS2022 {
 		// SS2022: server key at top level, per-user key must be Base64 of fixed-length raw bytes.
 		// Only blake3-aes-* supports multi-user in Xray; chacha20 variant is single-user only.
-		rawBuf := make([]byte, ss2022.size)
+		rawBuf := make([]byte, ss2022.Size)
 		for i := range users {
 			u := &users[i]
 			for j := range rawBuf {
@@ -838,7 +812,7 @@ func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteR
 	// unparseable ones with a log.
 	for _, cr := range customRules {
 		if xr.IsStructuredRule(cr) {
-			parsed, err := structuredRawToCustomRule(cr)
+			parsed, err := kernel.DecodeCustomRouteRule(cr)
 			if err != nil {
 				nlog.Core().Error("skipping unparseable structured custom route", "error", err)
 				continue
@@ -929,7 +903,7 @@ func compileCustomRouteRule(rule model.CustomRouteRule) []M {
 			if value == "" {
 				continue
 			}
-			domains = append(domains, "domain:"+value)
+			domains = append(domains, xrayDomainSuffix(value))
 		}
 		if len(domains) > 0 {
 			compiled = append(compiled, M{
@@ -975,6 +949,20 @@ func compileCustomRouteRule(rule model.CustomRouteRule) []M {
 		})
 	}
 	return compiled
+}
+
+// xrayDomainSuffix renders a structured suffix value for xray's domain
+// matcher. Values that already carry an xray matcher prefix (domain:, full:,
+// regexp:, geosite:, ext:) pass through unchanged; prefixing them again made
+// the rule match nothing (e.g. "domain:geosite:cn").
+func xrayDomainSuffix(value string) string {
+	lowered := strings.ToLower(value)
+	for _, prefix := range []string{"domain:", "full:", "regexp:", "geosite:", "ext:"} {
+		if strings.HasPrefix(lowered, prefix) {
+			return value
+		}
+	}
+	return "domain:" + value
 }
 
 func xrayOutboundForAction(action model.RouteAction) string {

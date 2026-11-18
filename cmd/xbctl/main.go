@@ -54,7 +54,7 @@ type fileRootConfig struct {
 	WS        *config.WSConfig   `yaml:"ws,omitempty"`
 	Runtime   *fileRuntimeConfig `yaml:"runtime,omitempty"`
 	Cert      *config.CertConfig `yaml:"cert,omitempty"`
-	Instances []fileInstance      `yaml:"instances,omitempty"`
+	Instances []fileInstance     `yaml:"instances,omitempty"`
 }
 
 type fileInstance struct {
@@ -74,6 +74,7 @@ type fileInstance struct {
 
 type filePanelConfig struct {
 	URL      string `yaml:"url"`
+	Token    string `yaml:"token,omitempty"`
 	TokenEnv string `yaml:"token_env,omitempty"`
 	NodeID   int    `yaml:"node_id,omitempty"`
 	NodeType string `yaml:"node_type,omitempty"`
@@ -81,6 +82,7 @@ type filePanelConfig struct {
 
 type fileMachineConfig struct {
 	MachineID int    `yaml:"machine_id"`
+	Token     string `yaml:"token,omitempty"`
 	TokenEnv  string `yaml:"token_env,omitempty"`
 }
 
@@ -372,6 +374,9 @@ func runBindAdd(mode string, args []string) error {
 	if err := runConfigInit(initArgs); err != nil {
 		return fmt.Errorf("bind failed: %w", err)
 	}
+	// Removing the last binding disables the unit; adding one re-enables it.
+	// enable is idempotent, and failure here must not block the bind.
+	runCommand("systemctl", "enable", serviceName)
 	// Restart service to pick up new config
 	fmt.Println("Restarting service...")
 	if err := runCommand("systemctl", "restart", serviceName); err != nil {
@@ -728,18 +733,21 @@ func parsePositiveInt(raw string, field string) (int, error) {
 	return value, nil
 }
 
-func removeBinding(panelURL string, nodeID int, machineID int, instanceID string) error {
-	root, err := loadWritableRootConfig(defaultConfigPath)
-	if err != nil {
-		return err
-	}
+// removalPlan is the pure result of matching bindings against a selector.
+// File writes and systemd state stay with the caller so this can be tested.
+type removalPlan struct {
+	kept      []config.Config
+	removed   []config.Config
+	wasLegacy bool
+}
+
+func planBindingRemoval(root *config.RootConfig, panelURL string, nodeID, machineID int, instanceID string) (removalPlan, error) {
+	plan := removalPlan{wasLegacy: len(root.Instances) == 0}
 	instances := normalizeRootInstances(root)
 	if len(instances) == 0 {
-		return errors.New("no instances configured")
+		return plan, errors.New("no instances configured")
 	}
-
-	kept := make([]config.Config, 0, len(instances))
-	removed := make([]config.Config, 0, 1)
+	plan.kept = make([]config.Config, 0, len(instances))
 	for _, inst := range instances {
 		var matched bool
 		if instanceID != "" {
@@ -756,50 +764,66 @@ func removeBinding(panelURL string, nodeID int, machineID int, instanceID string
 			}
 		}
 		if matched {
-			removed = append(removed, inst)
+			plan.removed = append(plan.removed, inst)
 			continue
 		}
-		kept = append(kept, inst)
+		plan.kept = append(plan.kept, inst)
 	}
-	if len(removed) == 0 {
+	if len(plan.removed) == 0 {
 		if instanceID != "" {
-			return fmt.Errorf("binding not found: id=%s", instanceID)
+			return plan, fmt.Errorf("binding not found: id=%s", instanceID)
 		}
 		if nodeID > 0 {
-			return fmt.Errorf("binding not found: panel=%s node_id=%d", panelURL, nodeID)
+			return plan, fmt.Errorf("binding not found: panel=%s node_id=%d", panelURL, nodeID)
 		}
-		return fmt.Errorf("binding not found: panel=%s machine_id=%d", panelURL, machineID)
+		return plan, fmt.Errorf("binding not found: panel=%s machine_id=%d", panelURL, machineID)
 	}
-	if len(kept) == 0 {
-		// Last binding removed — stop the service to prevent crash-loop
-		root.Instances = nil
-		if err := writeRootConfig(defaultConfigPath, root); err != nil {
-			return err
-		}
-		if err := pruneCredentialKeys(defaultCredentialsPath, removed); err != nil {
-			return err
-		}
-		if err := writeInstallMeta(defaultMetaPath, root); err != nil {
-			return err
-		}
-		runCommand("systemctl", "stop", serviceName)
-		fmt.Printf("removed %d binding(s)\n", len(removed))
-		fmt.Println("All bindings removed. Service stopped.")
-		fmt.Println("Use 'xbctl bind add-node/add-machine' to add a new binding, or 'xbctl uninstall' to fully uninstall.")
-		return nil
-	}
+	return plan, nil
+}
 
-	root.Instances = kept
+func removeBinding(panelURL string, nodeID int, machineID int, instanceID string) error {
+	root, err := loadWritableRootConfig(defaultConfigPath)
+	if err != nil {
+		return err
+	}
+	plan, err := planBindingRemoval(root, panelURL, nodeID, machineID, instanceID)
+	if err != nil {
+		return err
+	}
+	kept, removed := plan.kept, plan.removed
+	if len(kept) == 0 {
+		root.Instances = nil
+		if plan.wasLegacy {
+			// The removed instance lives in the top-level Config; clearing
+			// only Instances would make writeRootConfig write it back.
+			root.Config = config.Config{}
+		}
+	} else {
+		root.Instances = kept
+	}
 	// Preserve top-level shared settings (log, kernel, etc.) — instances inherit from these.
 	if err := writeRootConfig(defaultConfigPath, root); err != nil {
 		return err
 	}
-	if err := pruneCredentialKeys(defaultCredentialsPath, removed); err != nil {
+	if err := pruneCredentialKeys(defaultCredentialsPath, removed, kept); err != nil {
 		return err
 	}
 	if err := writeInstallMeta(defaultMetaPath, root); err != nil {
 		return err
 	}
+
+	if len(kept) == 0 {
+		// Last binding removed: disable the unit as well as stopping it. The
+		// remaining config cannot pass validation, so an enabled unit would
+		// restart and fail every 5s after the next boot (Restart=always).
+		runCommand("systemctl", "disable", serviceName)
+		runCommand("systemctl", "stop", serviceName)
+		fmt.Printf("removed %d binding(s)\n", len(removed))
+		fmt.Println("All bindings removed. Service disabled and stopped.")
+		fmt.Println("Use 'xbctl bind add-node/add-machine' to add a new binding, or 'xbctl uninstall' to fully uninstall.")
+		return nil
+	}
+
 	if err := runCommand("systemctl", "restart", serviceName); err != nil {
 		return err
 	}
@@ -837,6 +861,15 @@ func normalizeRootInstances(root *config.RootConfig) []config.Config {
 	return nil
 }
 
+// hasCertConfig reports whether the cert block carries anything worth
+// persisting. CertContent/KeyContent must be included: a config without
+// cert_mode resolves to content mode implicitly, and dropping the block made
+// the node lose its certificate on the next restart.
+func hasCertConfig(c config.CertConfig) bool {
+	return c.CertMode != "" || c.Domain != "" || c.CertFile != "" || c.AutoTLS ||
+		c.CertContent != "" || c.KeyContent != ""
+}
+
 func writeRootConfig(path string, root *config.RootConfig) error {
 	instances := root.Instances
 	if len(instances) == 0 && root.Config.Panel.URL != "" {
@@ -866,7 +899,7 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 	if p.WS.StatusInterval != 0 || p.WS.HandshakeTimeout != 0 || p.WS.BackoffInitial != 0 {
 		out.WS = &p.WS
 	}
-	if p.Cert.CertMode != "" || p.Cert.Domain != "" || p.Cert.CertFile != "" || p.Cert.AutoTLS {
+	if hasCertConfig(p.Cert) {
 		out.Cert = &p.Cert
 	}
 
@@ -875,6 +908,7 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 			ID: inst.InstanceID,
 			Panel: filePanelConfig{
 				URL:      inst.Panel.URL,
+				Token:    inst.Panel.Token,
 				TokenEnv: inst.Panel.TokenEnv,
 				NodeID:   inst.Panel.NodeID,
 				NodeType: inst.Panel.NodeType,
@@ -911,12 +945,13 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 		if inst.IsMachineMode() && inst.Machine != nil {
 			fi.Machine = &fileMachineConfig{
 				MachineID: inst.Machine.MachineID,
+				Token:     inst.Machine.Token,
 				TokenEnv:  inst.Machine.TokenEnv,
 			}
 			fi.Panel.NodeID = 0
 			fi.Panel.NodeType = ""
 		}
-		if inst.Cert.CertMode != "" || inst.Cert.Domain != "" || inst.Cert.CertFile != "" || inst.Cert.AutoTLS {
+		if hasCertConfig(inst.Cert) {
 			fi.Cert = &inst.Cert
 		}
 		if inst.WS.StatusInterval != 0 || inst.WS.HandshakeTimeout != 0 || inst.WS.BackoffInitial != 0 {
@@ -934,13 +969,26 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func pruneCredentialKeys(path string, removed []config.Config) error {
+func pruneCredentialKeys(path string, removed, remaining []config.Config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("read credentials: %w", err)
+	}
+	// Never delete a key another binding still references: generated keys are
+	// unique, but hand-written configs may share one token_env between nodes.
+	usedKeys := map[string]struct{}{}
+	for _, inst := range remaining {
+		if env := strings.TrimSpace(inst.Panel.TokenEnv); env != "" {
+			usedKeys[env] = struct{}{}
+		}
+		if inst.Machine != nil {
+			if env := strings.TrimSpace(inst.Machine.TokenEnv); env != "" {
+				usedKeys[env] = struct{}{}
+			}
+		}
 	}
 	removeKeys := map[string]struct{}{}
 	for _, inst := range removed {
@@ -952,6 +1000,9 @@ func pruneCredentialKeys(path string, removed []config.Config) error {
 				removeKeys[env] = struct{}{}
 			}
 		}
+	}
+	for key := range usedKeys {
+		delete(removeKeys, key)
 	}
 	lines := strings.Split(string(data), "\n")
 	kept := make([]string, 0, len(lines))
@@ -1360,6 +1411,19 @@ func runConfigInit(args []string) error {
 	} else {
 		envKey += "_API_KEY"
 		inst.Panel.TokenEnv = envKey
+	}
+
+	// No credentials destination: keep the secret in the config file (it is
+	// written 0600). Without this, --token was silently dropped and the node
+	// referenced an environment variable that was never written.
+	if token != "" && credentialsOut == "" {
+		if mode == "machine" {
+			inst.Machine.Token = token
+			inst.Machine.TokenEnv = ""
+		} else {
+			inst.Panel.Token = token
+			inst.Panel.TokenEnv = ""
+		}
 	}
 
 	if gomemlimit != "" {

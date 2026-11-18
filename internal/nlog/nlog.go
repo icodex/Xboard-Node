@@ -1,7 +1,6 @@
 package nlog
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,10 +34,10 @@ var (
 	defaultNode string
 	nodeLoggers = make(map[string]*NodeLog)
 
-	logMu      sync.RWMutex
-	logWriter  io.Writer = os.Stdout
-	logMin     = slog.LevelInfo
-	logColor   = true
+	logMu     sync.RWMutex
+	logWriter io.Writer = os.Stdout
+	logMin              = slog.LevelInfo
+	logColor            = true
 )
 
 // Init configures process-wide log output (called from config.InitLogger).
@@ -130,8 +129,10 @@ func normalizeProto(p string) string {
 		return "vless"
 	case "trojan":
 		return "trojan"
-	case "hysteria2", "hysteria":
+	case "hysteria2":
 		return "hysteria2"
+	case "hysteria":
+		return "hysteria"
 	case "tuic":
 		return "tuic"
 	case "anytls":
@@ -227,75 +228,7 @@ func logWithColor(level slog.Level, prefix, msg string, args ...any) {
 	)
 }
 
-// ─── Startup Summary ────────────────────────────────────────────────────────
-
-// StartupSummary logs a condensed startup summary.
-type StartupSummary struct {
-	mu    sync.Mutex
-	nodes []nodeInfo
-}
-
-type nodeInfo struct {
-	Protocol string
-	Port     int
-	Users    int
-}
-
-func NewStartupSummary() *StartupSummary {
-	return &StartupSummary{}
-}
-
-func (s *StartupSummary) AddNode(protocol string, port, users int) {
-	s.mu.Lock()
-	s.nodes = append(s.nodes, nodeInfo{protocol, port, users})
-	s.mu.Unlock()
-}
-
-func (s *StartupSummary) Print() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(s.nodes) == 0 {
-		Core().Warn("no nodes configured")
-		return
-	}
-
-	// Group by protocol
-	byProto := make(map[string][]nodeInfo)
-	for _, n := range s.nodes {
-		proto := normalizeProto(n.Protocol)
-		byProto[proto] = append(byProto[proto], n)
-	}
-
-	// Build summary line
-	parts := make([]string, 0, len(byProto))
-	for proto, nodes := range byProto {
-		ports := make([]string, 0, len(nodes))
-		for _, n := range nodes {
-			ports = append(ports, fmt.Sprintf("%d", n.Port))
-		}
-		parts = append(parts, fmt.Sprintf("%s:%s", proto, strings.Join(ports, ",")))
-	}
-
-	Core().Info(fmt.Sprintf("started %d nodes: %s", len(s.nodes), strings.Join(parts, " | ")))
-}
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-// ConfigUpdated logs a config update event.
-func ConfigUpdated(nl *NodeLog, users int) {
-	nl.Info(fmt.Sprintf("config updated, %d users", users))
-}
-
-// HotReload logs a hot-reload event (no restart).
-func HotReload(nl *NodeLog, what string) {
-	nl.Debug(fmt.Sprintf("hot-reload: %s", what))
-}
-
-// FullRestart logs a full kernel restart.
-func FullRestart(nl *NodeLog, reason string) {
-	nl.Info(fmt.Sprintf("kernel restart: %s", reason))
-}
 
 // ReportPushed logs a report push event.
 func ReportPushed(users, online int) {
@@ -305,19 +238,4 @@ func ReportPushed(users, online int) {
 // TrackerStats logs tracker statistics.
 func TrackerStats(conns, users int) {
 	Core().Debug(fmt.Sprintf("tracker: %d conns, %d users online", conns, users))
-}
-
-// Context-aware logging
-
-type ctxKey struct{}
-
-func WithNode(ctx context.Context, nl *NodeLog) context.Context {
-	return context.WithValue(ctx, ctxKey{}, nl)
-}
-
-func FromContext(ctx context.Context) *NodeLog {
-	if nl, ok := ctx.Value(ctxKey{}).(*NodeLog); ok {
-		return nl
-	}
-	return Core()
 }

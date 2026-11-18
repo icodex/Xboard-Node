@@ -157,7 +157,7 @@ func TestFlushAliveIPs(t *testing.T) {
 	}
 	tr.Process(map[int][2]int64{1: {100, 200}, 2: {30, 40}}, aliveIPs, 3)
 
-	flushed := tr.FlushAliveIPs()
+	flushed := tr.FlushAliveIPs(ConsumerReport)
 	if len(flushed[1]) != 2 {
 		t.Errorf("user 1 IPs: got %d, want 2", len(flushed[1]))
 	}
@@ -166,7 +166,7 @@ func TestFlushAliveIPs(t *testing.T) {
 	}
 
 	// Without another Process call, hash is same → returns nil (skip duplicate)
-	flushed2 := tr.FlushAliveIPs()
+	flushed2 := tr.FlushAliveIPs(ConsumerReport)
 	if flushed2 != nil {
 		t.Errorf("expected nil on duplicate flush, got %v", flushed2)
 	}
@@ -179,7 +179,7 @@ func TestFlushAliveIPs_DedupSameIP(t *testing.T) {
 	}
 	tr.Process(map[int][2]int64{1: {100, 200}}, aliveIPs, 2)
 
-	flushed := tr.FlushAliveIPs()
+	flushed := tr.FlushAliveIPs(ConsumerReport)
 	if len(flushed[1]) != 1 {
 		t.Errorf("expected 1 IP, got %d", len(flushed[1]))
 	}
@@ -237,7 +237,7 @@ func TestTrafficAccumulation(t *testing.T) {
 func TestFlushAliveIPs_ReturnsIndependentSnapshot(t *testing.T) {
 	tr := New()
 	tr.Process(map[int][2]int64{1: {10, 20}}, map[int]map[string]bool{1: {"1.1.1.1": true}}, 1)
-	first := tr.FlushAliveIPs()
+	first := tr.FlushAliveIPs(ConsumerReport)
 
 	tr.Process(map[int][2]int64{1: {10, 20}}, map[int]map[string]bool{1: {"9.9.9.9": true}}, 1)
 
@@ -250,15 +250,15 @@ func TestMarkAliveIPsStale(t *testing.T) {
 	tr := New()
 	tr.Process(map[int][2]int64{1: {1, 1}}, map[int]map[string]bool{1: {"1.1.1.1": true}}, 1)
 
-	if tr.FlushAliveIPs() == nil {
+	if tr.FlushAliveIPs(ConsumerReport) == nil {
 		t.Fatal("first flush should return data")
 	}
-	if tr.FlushAliveIPs() != nil {
+	if tr.FlushAliveIPs(ConsumerReport) != nil {
 		t.Fatal("unchanged snapshot should be skipped")
 	}
 
 	tr.MarkAliveIPsStale()
-	if again := tr.FlushAliveIPs(); again == nil || len(again[1]) != 1 {
+	if again := tr.FlushAliveIPs(ConsumerReport); again == nil || len(again[1]) != 1 {
 		t.Fatalf("after MarkAliveIPsStale flush should resend, got %v", again)
 	}
 }

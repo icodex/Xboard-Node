@@ -158,15 +158,14 @@ func (w *WSClient) Run(ctx context.Context) {
 		err := w.connect(ctx)
 
 		wasConnected := w.connected.Swap(false)
-		if wasConnected {
+		// Exactly one status notification per attempt: the previous code also
+		// notified inside the error branch, so every failed reconnect fired two
+		// REST pulls and two log lines.
+		if wasConnected || err != nil {
 			w.notifyStatus(false)
 		}
-
 		if err != nil {
 			nlog.Core().Warn("ws disconnected", "error", err)
-			if !wasConnected {
-				w.notifyStatus(false)
-			}
 		}
 
 		select {
@@ -240,10 +239,17 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	// Force the read goroutine to unblock on shutdown: conn.ReadJSON has no
 	// deadline, so a peer that never answers the close frame would otherwise
-	// hold the <-done wait below indefinitely.
+	// hold the <-done wait below indefinitely. done is closed when this
+	// connection ends too: every reconnect used to leave one more goroutine
+	// parked on ctx.Done until the whole service stopped.
+	connDone := make(chan struct{})
+	defer close(connDone)
 	go func() {
-		<-ctx.Done()
-		conn.Close()
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-connDone:
+		}
 	}()
 
 	// Read first message — expect auth.success or error
@@ -431,14 +437,32 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 
 	case WSEventSyncUsers:
 		nlog.Core().Debug("ws sync users event received")
-		var p syncUsersPayload
-		if err := decodeData(msg.Data, &p); err != nil {
+		var raw map[string]interface{}
+		if err := json.Unmarshal(msg.Data, &raw); err != nil {
 			nlog.Core().Warn("ws: cannot decode users payload", "error", err)
 			return
 		}
-		if len(p.Users) == 0 {
-			nlog.Core().Warn("ws: users payload empty")
+		// A present but empty array is valid: it removes every user (all
+		// expired or deleted). Only an array replaces the user set; a missing
+		// or null field is ignored, matching the REST path where nil means
+		// "no change". Dropping an empty list used to leave old credentials
+		// active, because REST polling is skipped while the WS is connected.
+		rawUsers, ok := raw["users"]
+		if !ok {
+			nlog.Core().Warn("ws: users payload missing")
 			return
+		}
+		if _, isArray := rawUsers.([]interface{}); !isArray {
+			nlog.Core().Warn("ws: users payload is not an array, ignoring")
+			return
+		}
+		var p syncUsersPayload
+		if err := decodeWeakRaw(raw, &p); err != nil {
+			nlog.Core().Warn("ws: cannot decode users payload", "error", err)
+			return
+		}
+		if p.Users == nil {
+			p.Users = []User{}
 		}
 		event.Users = p.Users
 		event.NodeID = p.NodeID

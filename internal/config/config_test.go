@@ -646,3 +646,34 @@ func TestInheritFrom_AutoTLSInheritedWhenChildHasNoCertConfig(t *testing.T) {
 		t.Error("auto_tls should be inherited when child has no cert config")
 	}
 }
+
+// A node that only overrides e.g. log_level must still get its own config_dir;
+// sharing the base dir made ValidateStartupLayout abort the whole daemon.
+func TestExpandNodes_DerivesUniqueConfigDirWithKernelOverride(t *testing.T) {
+	cfg := &Config{
+		Kernel: KernelConfig{ConfigDir: "/tmp/base", GeoDataDir: "/tmp/base"},
+		Nodes: []NodeEntry{
+			{NodeID: 1, Kernel: &KernelOverride{LogLevel: "debug"}},
+			{NodeID: 2},
+		},
+	}
+
+	nodes := cfg.ExpandNodes()
+	if len(nodes) != 2 {
+		t.Fatalf("ExpandNodes returned %d configs, want 2", len(nodes))
+	}
+	if nodes[0].Kernel.ConfigDir != "/tmp/base/node-1" {
+		t.Errorf("node 1 config_dir = %q, want /tmp/base/node-1", nodes[0].Kernel.ConfigDir)
+	}
+	if nodes[0].Kernel.ConfigDir == nodes[1].Kernel.ConfigDir {
+		t.Fatalf("config_dir collision: %q", nodes[0].Kernel.ConfigDir)
+	}
+	if err := ValidateStartupLayout(nodes); err != nil {
+		t.Fatalf("ValidateStartupLayout: %v", err)
+	}
+	// Explicit overrides still win.
+	cfg.Nodes[0].Kernel.ConfigDir = "/tmp/explicit"
+	if got := cfg.ExpandNodes()[0].Kernel.ConfigDir; got != "/tmp/explicit" {
+		t.Errorf("explicit config_dir = %q, want /tmp/explicit", got)
+	}
+}

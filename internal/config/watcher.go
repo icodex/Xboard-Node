@@ -141,6 +141,20 @@ func (w *Watcher) reload() {
 			nlog.Core().Error("config reload failed, keeping current config", "error", err)
 			return
 		}
+		// LoadRoot only checks field-level validity. Startup layout conflicts
+		// (duplicate health_port, shared config_dir, duplicate node binding)
+		// are caught by ValidateStartupLayout when the services are already
+		// stopped, which would make the daemon exit. Reject here instead so the
+		// running configuration stays untouched.
+		instances, err := root.NormalizeInstances()
+		if err != nil {
+			nlog.Core().Error("config reload rejected, keeping current config", "error", err)
+			return
+		}
+		if err := ValidateStartupLayout(instances); err != nil {
+			nlog.Core().Error("config reload rejected, keeping current config", "error", err)
+			return
+		}
 		nlog.Core().Info("config reloaded successfully")
 		w.onChangeRoot(root)
 		return

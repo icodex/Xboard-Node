@@ -77,8 +77,15 @@ func NewManager(cfg config.CertConfig) *Manager {
 // storePEM atomically swaps the in-memory cert material and persists to disk
 // so that restarts can reload without re-generating or re-requesting.
 func (m *Manager) storePEM(cert, key []byte) {
+	m.storePEMAt(cert, key, m.cfg.CertDir)
+}
+
+// storePEMAt is storePEM with an explicit directory. The ACME renewal callback
+// must use this: it runs on its own goroutine, and reading m.cfg there races
+// with Reconfigure assigning m.cfg from the service main loop.
+func (m *Manager) storePEMAt(cert, key []byte, dir string) {
 	m.mat.Store(&certMaterial{certPEM: cert, keyPEM: key})
-	m.persistPEM(cert, key)
+	m.persistPEMTo(dir, cert, key)
 }
 
 const (
@@ -88,10 +95,9 @@ const (
 	legacyKeyFile   = "key.pem"
 )
 
-// persistPEM writes cert/key to cert_dir for restart recovery.
+// persistPEMTo writes cert/key to the given dir for restart recovery.
 // Errors are logged but not returned — persistence is best-effort.
-func (m *Manager) persistPEM(cert, key []byte) {
-	dir := m.cfg.CertDir
+func (m *Manager) persistPEMTo(dir string, cert, key []byte) {
 	if dir == "" {
 		return
 	}
@@ -456,12 +462,13 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 	// concurrently (data race).
 	domain := m.cfg.Domain
 	email := m.cfg.Email
+	certDir := m.cfg.CertDir
 
-	if err := os.MkdirAll(m.cfg.CertDir, 0o755); err != nil {
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		return fmt.Errorf("create cert dir: %w", err)
 	}
 
-	storage := &certmagic.FileStorage{Path: m.cfg.CertDir}
+	storage := &certmagic.FileStorage{Path: certDir}
 
 	var magic *certmagic.Config
 	cache := certmagic.NewCache(certmagic.CacheOptions{
@@ -484,7 +491,7 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 			if issuerKey == "" {
 				return nil
 			}
-			if err := m.loadPEMFromStorage(evtCtx, storage, issuerKey, domain); err != nil {
+			if err := m.loadPEMFromStorageAt(evtCtx, storage, issuerKey, domain, certDir); err != nil {
 				nlog.Core().Error("failed to reload cert after renewal", "error", err)
 				return nil
 			}
@@ -528,7 +535,7 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 	}
 
 	issuerKey := magic.Issuers[0].IssuerKey()
-	if err := m.loadPEMFromStorage(acmeCtx, storage, issuerKey, domain); err != nil {
+	if err := m.loadPEMFromStorageAt(acmeCtx, storage, issuerKey, domain, certDir); err != nil {
 		acmeCancel()
 		return fmt.Errorf("load cert from storage: %w", err)
 	}
@@ -582,8 +589,14 @@ func (m *Manager) newDNSProvider() (certmagic.DNSProvider, error) {
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 // loadPEMFromStorage reads cert + key for domain from certmagic storage into
-// the in-memory cache. Single entry point for both initial load and renewal refresh.
+// the in-memory cache, persisting to the manager's current cert dir.
 func (m *Manager) loadPEMFromStorage(ctx context.Context, storage certmagic.Storage, issuerKey, domain string) error {
+	return m.loadPEMFromStorageAt(ctx, storage, issuerKey, domain, m.cfg.CertDir)
+}
+
+// loadPEMFromStorageAt is loadPEMFromStorage with an explicit persist dir.
+// The renewal callback must use this so it never reads m.cfg.
+func (m *Manager) loadPEMFromStorageAt(ctx context.Context, storage certmagic.Storage, issuerKey, domain, certDir string) error {
 	if issuerKey == "" || domain == "" {
 		return fmt.Errorf("loadPEMFromStorage: issuerKey and domain are required")
 	}
@@ -601,6 +614,6 @@ func (m *Manager) loadPEMFromStorage(ctx context.Context, storage certmagic.Stor
 	if err := validateKeyPair(certPEM, keyPEM); err != nil {
 		return fmt.Errorf("invalid cert/key pair on disk: %w", err)
 	}
-	m.storePEM(certPEM, keyPEM)
+	m.storePEMAt(certPEM, keyPEM, certDir)
 	return nil
 }

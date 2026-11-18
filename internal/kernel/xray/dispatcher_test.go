@@ -431,3 +431,21 @@ func TestLimitDispatcher_GlobalByUIDTranslation(t *testing.T) {
 		t.Fatal("ClearGlobalDevices must empty the snapshot")
 	}
 }
+
+// Sequential admissions must respect the limit too: the lexicographic rule
+// used to admit a lower-sorting newcomer after the limit was already reached.
+func TestLimitDispatcher_DeviceLimitRejectsLowerSortingNewIP(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, map[string]int{email: 2})
+
+	if ld.checkDeviceLimit(email, "9.9.9.9") {
+		t.Fatal("first IP should be allowed")
+	}
+	if ld.checkDeviceLimit(email, "8.8.8.8") {
+		t.Fatal("second IP should be allowed")
+	}
+	if !ld.checkDeviceLimit(email, "1.1.1.1") {
+		t.Fatal("third IP must be rejected even though it sorts lower")
+	}
+}

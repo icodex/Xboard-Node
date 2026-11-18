@@ -16,9 +16,16 @@ const (
 	singboxGeoSiteURL = "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db"
 	xrayGeoIPURL      = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
 	xrayGeoSiteURL    = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+
+	// minGeoFileSize rejects truncated downloads. Every published geo database
+	// is several MiB; anything smaller is a partial file or an error page.
+	minGeoFileSize = 1 << 20
 )
 
-var httpClient = &http.Client{Timeout: 10 * time.Minute}
+// httpClient timeout is deliberately short: the download runs inside kernel
+// start, and a hung GitHub connection used to stall startup for 10 minutes per
+// file before failing.
+var httpClient = &http.Client{Timeout: 60 * time.Second}
 
 func Ensure(dir string, needGeoIP, needGeoSite bool, kernelType string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -61,15 +68,20 @@ func Ensure(dir string, needGeoIP, needGeoSite bool, kernelType string) error {
 
 func ensureFile(dir, name, url string) error {
 	dst := filepath.Join(dir, name)
-	if _, err := os.Stat(dst); err == nil {
-		return nil
+	if fi, err := os.Stat(dst); err == nil {
+		if fi.Size() > 0 {
+			return nil
+		}
+		// Only a zero-byte placeholder is removed. A smaller-than-expected
+		// file may be a user-provided custom database; never delete it.
+		nlog.Core().Warn("geo database is empty, re-downloading", "file", name, "dir", dir)
+		if err := os.Remove(dst); err != nil {
+			return fmt.Errorf("remove empty %s: %w", dst, err)
+		}
 	}
 	nlog.Core().Info("geo database missing, downloading automatically", "file", name, "url", url)
 	if err := atomicDownload(dst, url); err != nil {
-		return err
-	}
-	if fi, err := os.Stat(dst); err == nil {
-		nlog.Core().Info("geo database ready", "file", name, "size_kb", fi.Size()/1024)
+		return fmt.Errorf("%w; download %s manually into %s", err, name, dir)
 	}
 	return nil
 }
@@ -96,11 +108,21 @@ func atomicDownload(dst, url string) error {
 		f.Close()
 		return fmt.Errorf("write geo database: %w", err)
 	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("stat temp file: %w", err)
+	}
+	if fi.Size() < minGeoFileSize {
+		f.Close()
+		return fmt.Errorf("downloaded file is too small (%d bytes)", fi.Size())
+	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		return fmt.Errorf("rename to destination: %w", err)
 	}
+	nlog.Core().Info("geo database ready", "file", filepath.Base(dst), "size_kb", fi.Size()/1024)
 	return nil
 }

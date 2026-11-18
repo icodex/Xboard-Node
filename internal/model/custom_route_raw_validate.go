@@ -41,7 +41,7 @@ func SanitizeRawCustomRoutes(n *NodeSpec, kernelType string, availableTags map[s
 			continue
 		}
 		prefix := fmt.Sprintf("custom_routes[%d]", keptIdx[i])
-		keep, issue := validateStructuredRawRule(rule, prefix, availableTags)
+		keep, issue := validateStructuredRawRule(rule, prefix, kernelType, availableTags)
 		if issue != "" {
 			nlog.Core().Error("dropping invalid raw custom route", "issue", issue)
 			continue
@@ -57,7 +57,7 @@ func SanitizeRawCustomRoutes(n *NodeSpec, kernelType string, availableTags map[s
 // validateStructuredRawRule applies the ValidateCustomRouteRules contract to
 // one structured raw entry. Returns an issue string when the rule must be
 // dropped; "" when it is kept.
-func validateStructuredRawRule(rule map[string]any, prefix string, availableTags map[string]struct{}) (keep bool, issue string) {
+func validateStructuredRawRule(rule map[string]any, prefix, kernelType string, availableTags map[string]struct{}) (keep bool, issue string) {
 	parsed, err := parseStructuredRawRule(rule)
 	if err != nil {
 		return false, fmt.Sprintf("%s: %v", prefix, err)
@@ -67,6 +67,9 @@ func validateStructuredRawRule(rule map[string]any, prefix string, availableTags
 	}
 	if !hasRouteMatch(parsed.Match) {
 		return false, fmt.Sprintf("%s: match is required (at least one of domains, domain_suffixes, ip_cidrs, ports, networks, source_cidrs, source_ports)", prefix)
+	}
+	if err := validateMatcherValues(kernelType, parsed.Match, prefix+".match"); err != nil {
+		return false, err.Error()
 	}
 	if err := validatePortSpecs(parsed.Match.Ports, prefix+".match.ports"); err != nil {
 		return false, err.Error()

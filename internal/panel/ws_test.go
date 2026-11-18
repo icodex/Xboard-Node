@@ -456,3 +456,61 @@ func TestWSClient_EmptyDevicesPayloadDecodes(t *testing.T) {
 		})
 	}
 }
+
+// An explicit empty users array clears every user (all expired or deleted).
+// Dropping it left the old credentials active while REST polling was skipped.
+func TestWSClient_AcceptsEmptyUsersPayload(t *testing.T) {
+	var got *WSEvent
+	ws := NewWSClient("ws://unused", "tok", 1, WSClientConfig{}, func(ev WSEvent) {
+		got = &ev
+	}, nil, nil)
+
+	ws.handleMessage(wsMessage{
+		Event: WSEventSyncUsers,
+		Data:  json.RawMessage(`{"users":[],"node_id":7}`),
+	})
+
+	if got == nil {
+		t.Fatal("empty users event was dropped")
+	}
+	if got.Users == nil || len(got.Users) != 0 {
+		t.Fatalf("Users = %v, want a non-nil empty list", got.Users)
+	}
+	if got.NodeID != 7 {
+		t.Fatalf("NodeID = %d, want 7", got.NodeID)
+	}
+}
+
+func TestWSClient_DropsUsersPayloadWithoutField(t *testing.T) {
+	var got *WSEvent
+	ws := NewWSClient("ws://unused", "tok", 1, WSClientConfig{}, func(ev WSEvent) {
+		got = &ev
+	}, nil, nil)
+
+	ws.handleMessage(wsMessage{
+		Event: WSEventSyncUsers,
+		Data:  json.RawMessage(`{"node_id":7}`),
+	})
+
+	if got != nil {
+		t.Fatalf("payload without users must be dropped, got %#v", got)
+	}
+}
+
+// A null users field means "no data"; it must not wipe the user set. Only a
+// JSON array (including an empty one) replaces it.
+func TestWSClient_DropsNullUsersPayload(t *testing.T) {
+	var got *WSEvent
+	ws := NewWSClient("ws://unused", "tok", 1, WSClientConfig{}, func(ev WSEvent) {
+		got = &ev
+	}, nil, nil)
+
+	ws.handleMessage(wsMessage{
+		Event: WSEventSyncUsers,
+		Data:  json.RawMessage(`{"users":null,"node_id":7}`),
+	})
+
+	if got != nil {
+		t.Fatalf("null users payload must be ignored, got %#v", got)
+	}
+}

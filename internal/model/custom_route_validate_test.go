@@ -82,3 +82,62 @@ func TestValidateCustomRouteRules(t *testing.T) {
 		})
 	}
 }
+
+// Geo database references: xray loads geoip/geosite, sing-box has neither.
+// A value under the wrong matcher also has to fail (xray would silently never
+// match) instead of reaching the kernel and failing config parsing.
+func TestValidateCustomRouteRules_GeoValues(t *testing.T) {
+	rule := func(m RouteMatch) []CustomRouteRule {
+		return []CustomRouteRule{{Match: m, Action: RouteAction{Type: "direct"}}}
+	}
+	tests := []struct {
+		name    string
+		kernel  string
+		match   RouteMatch
+		wantErr bool
+	}{
+		{"xray geoip in ip_cidrs", "xray", RouteMatch{IPCIDRs: []string{"geoip:cn"}}, false},
+		{"xray geosite in domain_suffixes", "xray", RouteMatch{DomainSuffixes: []string{"geosite:cn"}}, false},
+		{"xray geosite in ip_cidrs", "xray", RouteMatch{IPCIDRs: []string{"geosite:cn"}}, true},
+		{"xray geoip in domains", "xray", RouteMatch{Domains: []string{"geoip:cn"}}, true},
+		{"singbox geoip", "singbox", RouteMatch{IPCIDRs: []string{"geoip:cn"}}, true},
+		{"singbox geosite", "singbox", RouteMatch{DomainSuffixes: []string{"geosite:cn"}}, true},
+		{"singbox literal", "singbox", RouteMatch{IPCIDRs: []string{"10.0.0.0/8"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCustomRouteRules(rule(tt.match), tt.kernel, nil)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateCustomRouteRules error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Prefixes that only one kernel understands must not slip through validation.
+func TestValidateCustomRouteRules_MatcherPrefixes(t *testing.T) {
+	rule := func(m RouteMatch) []CustomRouteRule {
+		return []CustomRouteRule{{Match: m, Action: RouteAction{Type: "direct"}}}
+	}
+	tests := []struct {
+		name    string
+		kernel  string
+		match   RouteMatch
+		wantErr bool
+	}{
+		{"xray full in domains", "xray", RouteMatch{Domains: []string{"full:a.example"}}, false},
+		{"xray full in suffix", "xray", RouteMatch{DomainSuffixes: []string{"full:a.example"}}, false},
+		{"xray full in ip_cidrs", "xray", RouteMatch{IPCIDRs: []string{"full:a.example"}}, true},
+		{"singbox full in domains", "singbox", RouteMatch{Domains: []string{"full:a.example"}}, true},
+		{"singbox domain in suffix", "singbox", RouteMatch{DomainSuffixes: []string{"domain:a.example"}}, true},
+		{"singbox plain suffix", "singbox", RouteMatch{DomainSuffixes: []string{"a.example"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCustomRouteRules(rule(tt.match), tt.kernel, nil)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

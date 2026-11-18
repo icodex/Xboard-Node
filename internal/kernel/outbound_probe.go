@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"fmt"
 	"net"
 	"strconv"
 	"sync"
@@ -90,7 +89,7 @@ func ProbeCustomOutbounds(outbounds []model.OutboundConfig, timeout time.Duratio
 			results[i] = OutboundProbeResult{Tag: t.tag, Protocol: t.protocol, Endpoint: t.endpoint}
 			conn, err := net.DialTimeout("tcp", t.endpoint, timeout)
 			if err != nil {
-				results[i].Err = fmt.Errorf("%w", err)
+				results[i].Err = err
 				return
 			}
 			_ = conn.Close()

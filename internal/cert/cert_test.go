@@ -332,7 +332,7 @@ func TestPersistPEM_ReadOnlyNoopWhenContentMatches(t *testing.T) {
 
 	m := NewManager(config.CertConfig{CertDir: dir})
 	// Should not log error or panic because content is already equal on disk
-	m.persistPEM(certPEM, keyPEM)
+	m.persistPEMTo(dir, certPEM, keyPEM)
 }
 
 func TestResolveModeFor_CertDirWithDefaultFiles(t *testing.T) {
