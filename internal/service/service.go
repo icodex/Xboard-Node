@@ -105,6 +105,10 @@ type Service struct {
 	// defaults, so tests can exercise the give-up path without waiting 30s.
 	certRetryAttempts int
 	certRetryBase     time.Duration
+
+	// certReconfigure performs one reconfiguration attempt. Nil uses the cert
+	// manager; tests override it to count attempts without touching files.
+	certReconfigure func(context.Context, config.CertConfig) (bool, error)
 }
 
 // certUpdate carries an applied certificate configuration back to the main
@@ -532,6 +536,10 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 	if base <= 0 {
 		base = certRetryBaseDelay
 	}
+	reconfigure := s.certReconfigure
+	if reconfigure == nil {
+		reconfigure = s.cert.Reconfigure
+	}
 
 	attempt := 0
 	changedAny := false
@@ -540,7 +548,7 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 
 	for {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		changed, err := s.cert.Reconfigure(rctx, cfg)
+		changed, err := reconfigure(rctx, cfg)
 		cancel()
 		if err == nil {
 			attempt = 0

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -532,11 +533,13 @@ func TestCertReconfigureGivesUpAfterRetries(t *testing.T) {
 	s.certRetryAttempts = 2
 	s.certRetryBase = time.Millisecond
 
-	s.startCertReconfigure(context.Background(), config.CertConfig{
-		CertMode: "file",
-		CertFile: filepath.Join(t.TempDir(), "missing.pem"),
-		KeyFile:  filepath.Join(t.TempDir(), "missing.key"),
-	})
+	var attempts atomic.Int32
+	s.certReconfigure = func(context.Context, config.CertConfig) (bool, error) {
+		attempts.Add(1)
+		return false, errors.New("reconfigure failed")
+	}
+
+	s.startCertReconfigure(context.Background(), config.CertConfig{CertMode: "file"})
 
 	select {
 	case upd := <-s.certUpdates:
@@ -550,6 +553,9 @@ func TestCertReconfigureGivesUpAfterRetries(t *testing.T) {
 		t.Fatal("timed out waiting for the give-up update")
 	}
 
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("reconfigure attempts = %d, want 2", got)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for s.certWorkers.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
