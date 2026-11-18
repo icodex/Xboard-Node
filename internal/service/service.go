@@ -100,6 +100,11 @@ type Service struct {
 	// loop, and a bool was cleared too early in that window.
 	certWorkers    atomic.Int32
 	configDeferred atomic.Bool
+
+	// Certificate retry tuning. Zero values fall back to the production
+	// defaults, so tests can exercise the give-up path without waiting 30s.
+	certRetryAttempts int
+	certRetryBase     time.Duration
 }
 
 // certUpdate carries an applied certificate configuration back to the main
@@ -509,13 +514,24 @@ func (s *Service) startCertReconfigure(ctx context.Context, cfg config.CertConfi
 	go s.runCertReconfigure(ctx, cfg)
 }
 
-// certRetryMax bounds how many times a failed runtime certificate
-// reconfiguration is retried before it is dropped. A later panel push still
-// triggers a fresh attempt.
-const certRetryMax = 5
+// Defaults for runtime certificate retries. A later panel push still
+// triggers a fresh attempt after the limit is reached.
+const (
+	certRetryMax       = 5
+	certRetryBaseDelay = time.Second
+)
 
 func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig) {
 	defer s.certWorkers.Add(-1)
+
+	maxAttempts := s.certRetryAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = certRetryMax
+	}
+	base := s.certRetryBase
+	if base <= 0 {
+		base = certRetryBaseDelay
+	}
 
 	attempt := 0
 	changedAny := false
@@ -547,10 +563,10 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 			s.certMu.Unlock()
 			continue
 		}
-		if err != nil && attempt < certRetryMax {
+		if err != nil && attempt < maxAttempts {
 			s.certMu.Unlock()
-			// Exponential backoff: 2s, 4s, 8s, 16s.
-			timer := time.NewTimer(time.Duration(1<<attempt) * time.Second)
+			// Exponential backoff: base*2^attempt (2s, 4s, 8s, 16s by default).
+			timer := time.NewTimer(base * time.Duration(1<<attempt))
 			select {
 			case <-timer.C:
 			case <-ctx.Done():

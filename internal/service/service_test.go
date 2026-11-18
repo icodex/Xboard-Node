@@ -523,3 +523,44 @@ func TestCertReconfigureFailureCancelsCleanly(t *testing.T) {
 	default:
 	}
 }
+
+// A config that keeps failing is retried a bounded number of times, then
+// reported as a failure so the main loop can apply any deferred kernel change.
+func TestCertReconfigureGivesUpAfterRetries(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.certRetryAttempts = 2
+	s.certRetryBase = time.Millisecond
+
+	s.startCertReconfigure(context.Background(), config.CertConfig{
+		CertMode: "file",
+		CertFile: filepath.Join(t.TempDir(), "missing.pem"),
+		KeyFile:  filepath.Join(t.TempDir(), "missing.key"),
+	})
+
+	select {
+	case upd := <-s.certUpdates:
+		if upd.ok {
+			t.Fatal("give-up must not be reported as success")
+		}
+		if upd.changed {
+			t.Fatal("a failed reconfiguration must not report changed material")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the give-up update")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.certWorkers.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.certWorkers.Load(); got != 0 {
+		t.Fatalf("certWorkers = %d, want 0 after give-up", got)
+	}
+	s.certMu.Lock()
+	busy := s.certBusy
+	s.certMu.Unlock()
+	if busy {
+		t.Fatal("certBusy must be false after give-up")
+	}
+}
