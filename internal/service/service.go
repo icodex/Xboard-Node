@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -581,7 +580,7 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec, 
 
 	// Dynamic Log Level (Kernel)
 	if nc.KernelLogLevel != "" && nc.KernelLogLevel != s.cfg.Kernel.LogLevel {
-		nlog.Core().Info("cert: kernel log level override", "old", s.cfg.Kernel.LogLevel, "new", nc.KernelLogLevel)
+		nlog.Core().Info("kernel log level override", "old", s.cfg.Kernel.LogLevel, "new", nc.KernelLogLevel)
 		s.cfg.Kernel.LogLevel = nc.KernelLogLevel
 	}
 
@@ -953,7 +952,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if s.nodeLog == nil {
 			s.nodeLog = nlog.ForNode(nodeDisplayProtocol(event.Config), event.Config.ServerPort)
 		}
-		s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(event.Users)))
+		s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
 		s.metricsMu.Lock()
 		s.lastConfig = event.Config
 		s.metricsMu.Unlock()
@@ -1158,10 +1157,10 @@ func (s *Service) updateUserState(users []model.UserSpec) {
 	if users == nil {
 		users = []model.UserSpec{}
 	}
-	_, _ = s.prepareUserState(users)
+	_, _ = s.prepareUserState(users, "")
 }
 
-func (s *Service) prepareUserState(users []model.UserSpec) (prevUsers []model.UserSpec, prevHash string) {
+func (s *Service) prepareUserState(users []model.UserSpec, knownHash string) (prevUsers []model.UserSpec, prevHash string) {
 	if users == nil {
 		users = []model.UserSpec{}
 	}
@@ -1173,6 +1172,40 @@ func (s *Service) prepareUserState(users []model.UserSpec) (prevUsers []model.Us
 
 	s.limiter.UpdateUsers(users)
 	s.speedTracker.UpdateBuckets()
+
+	s.metricsMu.Lock()
+	s.lastUsers = append([]model.UserSpec(nil), users...)
+	s.metricsMu.Unlock()
+	if knownHash != "" {
+		s.lastUserHash = knownHash
+	} else {
+		s.lastUserHash = computeUserHash(users)
+	}
+	return prevUsers, prevHash
+}
+
+// prepareUserDeltaState updates the derived indexes for exactly the users a
+// panel delta touched, instead of rebuilding both limiter maps and every speed
+// bucket for the whole table on the main loop.
+func (s *Service) prepareUserDeltaState(users, changed []model.UserSpec, action string) (prevUsers []model.UserSpec, prevHash string) {
+	s.metricsMu.RLock()
+	prevUsers = append([]model.UserSpec(nil), s.lastUsers...)
+	s.metricsMu.RUnlock()
+	prevHash = s.lastUserHash
+
+	if action == "remove" {
+		ids := make([]int, 0, len(changed))
+		for _, u := range changed {
+			if u.ID > 0 {
+				ids = append(ids, u.ID)
+			}
+		}
+		s.limiter.UpdateUsersDelta(nil, ids)
+		s.speedTracker.UpdateBucketsDelta(nil, ids)
+	} else {
+		s.limiter.UpdateUsersDelta(changed, nil)
+		s.speedTracker.UpdateBucketsDelta(changed, nil)
+	}
 
 	s.metricsMu.Lock()
 	s.lastUsers = append([]model.UserSpec(nil), users...)
@@ -1285,7 +1318,7 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 		return
 	}
 
-	prevUsers, prevHash := s.prepareUserState(users)
+	prevUsers, prevHash := s.prepareUserState(users, newHash)
 	added, removed, err := s.kernel.UpdateUsers(users)
 	if err != nil {
 		nlog.Core().Warn(fmt.Sprintf("UpdateUsers failed, restarting kernel: %v", err))
@@ -1293,9 +1326,6 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 			s.restoreUserState(prevUsers, prevHash)
 		}
 		return
-	}
-	if newHash != "" {
-		s.lastUserHash = newHash
 	}
 	if s.nodeLog != nil && (added > 0 || removed > 0) {
 		s.nodeLog.Info(fmt.Sprintf("users updated: +%d -%d", added, removed))
@@ -1343,7 +1373,7 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 			return
 		}
 
-		prevUsers, prevHash := s.prepareUserState(merged)
+		prevUsers, prevHash := s.prepareUserDeltaState(merged, deltaUsers, "add")
 		added, err := s.kernel.AddUsers(deltaUsers)
 		if err != nil {
 			nlog.Core().Warn(fmt.Sprintf("AddUsers failed: %v, falling back to UpdateUsers", err))
@@ -1369,7 +1399,7 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 			return
 		}
 
-		prevUsers, prevHash := s.prepareUserState(filtered)
+		prevUsers, prevHash := s.prepareUserDeltaState(filtered, deltaUsers, "remove")
 		removed, err := s.kernel.RemoveUsers(deltaUsers)
 		if err != nil {
 			nlog.Core().Warn(fmt.Sprintf("RemoveUsers failed: %v, falling back to UpdateUsers", err))
@@ -1728,15 +1758,18 @@ func computeUserHash(users []model.UserSpec) string {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
 	h := sha256.New()
-	var buf [8]byte
+	var idBuf [8]byte
+	uuidBuf := make([]byte, 0, 64)
 	for _, u := range sorted {
-		binary.LittleEndian.PutUint64(buf[:], uint64(u.ID))
-		h.Write(buf[:])
-		io.WriteString(h, u.UUID)
-		binary.LittleEndian.PutUint64(buf[:], uint64(u.SpeedLimit))
-		h.Write(buf[:])
-		binary.LittleEndian.PutUint64(buf[:], uint64(u.DeviceLimit))
-		h.Write(buf[:])
+		binary.LittleEndian.PutUint64(idBuf[:], uint64(u.ID))
+		h.Write(idBuf[:])
+		// Reuse the scratch buffer: io.WriteString allocates per user.
+		uuidBuf = append(uuidBuf[:0], u.UUID...)
+		h.Write(uuidBuf)
+		binary.LittleEndian.PutUint64(idBuf[:], uint64(u.SpeedLimit))
+		h.Write(idBuf[:])
+		binary.LittleEndian.PutUint64(idBuf[:], uint64(u.DeviceLimit))
+		h.Write(idBuf[:])
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
@@ -1823,7 +1856,7 @@ func validateNodeRuntime(cfg *config.Config, kcfgSupported []string, spec *model
 	if kernelType == "singbox" && spec.Protocol == "vmess" && spec.TLS == 2 {
 		return fmt.Errorf("vmess with Reality would silently run plaintext on sing-box; use kernel xray or auto")
 	}
-	if err := validateTLSRequirements(spec, tls, kernelType); err != nil {
+	if err := validateTLSRequirements(spec, tls, kernelType, cfg.Kernel.AllowPlaintextTLS); err != nil {
 		return err
 	}
 	if err := validateRuntimeCertConfig(spec); err != nil {
@@ -1832,7 +1865,7 @@ func validateNodeRuntime(cfg *config.Config, kcfgSupported []string, spec *model
 	return nil
 }
 
-func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert, kernelType string) error {
+func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert, kernelType string, allowPlaintext bool) error {
 	needsCert := false
 	switch spec.Protocol {
 	case "hysteria", "hysteria2", "tuic", "anytls":
@@ -1840,6 +1873,18 @@ func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert, kernelTyp
 	case "trojan":
 		if spec.TLS != 2 {
 			needsCert = true
+		}
+	case "vmess", "vless":
+		// tls=1 promises TLS to the panel and clients; without material the
+		// sing-box builders would run a plaintext inbound.
+		if spec.TLS == 1 {
+			needsCert = true
+		}
+	}
+	if allowPlaintext && spec.TLS == 1 {
+		switch spec.Protocol {
+		case "vmess", "vless", "trojan":
+			needsCert = false
 		}
 	}
 	if needsCert && !hasUsableTLSConfig(spec, tls) {

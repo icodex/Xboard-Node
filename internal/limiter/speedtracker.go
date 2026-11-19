@@ -20,6 +20,7 @@ type SpeedTracker struct {
 	mu      sync.RWMutex
 	buckets map[int]*rate.Limiter // userID → shared rate limiter
 	uuidMap map[string]int        // UUID → userID
+	idUUID  map[int]string        // userID → UUID (removal needs the reverse)
 
 	// Fast-path: when no users have a speed limit, GetLimiter returns nil
 	// immediately without any map lookup.
@@ -35,6 +36,7 @@ func NewSpeedTracker(l *Limiter) *SpeedTracker {
 		limiter: l,
 		buckets: make(map[int]*rate.Limiter),
 		uuidMap: make(map[string]int),
+		idUUID:  make(map[int]string),
 	}
 }
 
@@ -57,18 +59,20 @@ func (t *SpeedTracker) UpdateBuckets() {
 		defer t.mu.Unlock()
 
 		newUUIDMap := make(map[string]int, len(currentUsers))
+		newIDUUID := make(map[int]string, len(currentUsers))
 		activeIDs := make(map[int]struct{}, len(currentUsers))
 
 		for _, user := range currentUsers {
 			activeIDs[user.ID] = struct{}{}
 			if user.UUID != "" {
 				newUUIDMap[user.UUID] = user.ID
+				newIDUUID[user.ID] = user.UUID
 			}
 
 			// Update existing limiter if speed changed
 			if lim, ok := t.buckets[user.ID]; ok {
 				if user.SpeedLimit > 0 {
-					bytesPerSec := int(user.SpeedLimit) * 1_000_000 / 8
+					bytesPerSec := int(model.SpeedLimitBytesPerSec(user.SpeedLimit))
 					burst := bytesPerSec
 					if burst < 64*1024 {
 						burst = 64 * 1024
@@ -89,9 +93,54 @@ func (t *SpeedTracker) UpdateBuckets() {
 		}
 
 		t.uuidMap = newUUIDMap
+		t.idUUID = newIDUUID
 		t.hasLimits.Store(len(t.buckets) > 0)
 	}()
 
+	if t.logFunc != nil {
+		t.logFunc("buckets updated")
+	}
+}
+
+// UpdateBucketsDelta applies one panel delta without rebuilding the UUID maps
+// or scanning every active user. Buckets themselves are created lazily by
+// GetLimiter on the first connection.
+func (t *SpeedTracker) UpdateBucketsDelta(upserts []model.UserSpec, removedIDs []int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, id := range removedIDs {
+		delete(t.buckets, id)
+		if uuid, ok := t.idUUID[id]; ok {
+			delete(t.uuidMap, uuid)
+			delete(t.idUUID, id)
+		}
+	}
+	for _, user := range upserts {
+		if old, ok := t.idUUID[user.ID]; ok && user.UUID != "" && old != user.UUID {
+			delete(t.uuidMap, old)
+		}
+		if user.UUID != "" {
+			t.uuidMap[user.UUID] = user.ID
+			t.idUUID[user.ID] = user.UUID
+		}
+		lim, ok := t.buckets[user.ID]
+		if !ok {
+			continue
+		}
+		if user.SpeedLimit <= 0 {
+			delete(t.buckets, user.ID)
+			continue
+		}
+		bytesPerSec := int(model.SpeedLimitBytesPerSec(user.SpeedLimit))
+		burst := bytesPerSec
+		if burst < 64*1024 {
+			burst = 64 * 1024
+		}
+		lim.SetLimit(rate.Limit(bytesPerSec))
+		lim.SetBurst(burst)
+	}
+	t.hasLimits.Store(len(t.buckets) > 0)
 	if t.logFunc != nil {
 		t.logFunc("buckets updated")
 	}
@@ -123,7 +172,7 @@ func (t *SpeedTracker) GetLimiter(user string) *rate.Limiter {
 	}
 
 	// Create limiter on-demand
-	bytesPerSec := int(u.SpeedLimit) * 1_000_000 / 8
+	bytesPerSec := int(model.SpeedLimitBytesPerSec(u.SpeedLimit))
 	burst := bytesPerSec
 	if burst < 64*1024 {
 		burst = 64 * 1024

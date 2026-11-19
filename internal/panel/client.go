@@ -24,7 +24,7 @@ import (
 // buggy or hostile response must not grow the decoder without bound: one
 // process hosts every node instance, so an unbounded document is an OOM for
 // all of them. The WS side already limits messages to 10 MiB.
-const maxResponseBytes = 64 << 20
+const maxResponseBytes = 10 << 20
 
 // CapabilityDeviceDelta is advertised in report.status so the panel knows it may
 // send sync.devices.delta (only changed users) instead of the full snapshot.
@@ -283,9 +283,16 @@ func (c *Client) GetUsers() ([]User, error) {
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
 	}
 
-	var usersResp UsersResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&usersResp); err != nil {
+	// Weak decode like GetConfig: legacy panels send numbers as strings, and
+	// a strict decode here failed startup while the WS path accepted the same
+	// data.
+	var raw map[string]interface{}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
+	}
+	var usersResp UsersResponse
+	if err := decodeWeakRaw(raw, &usersResp); err != nil {
+		return nil, fmt.Errorf("weak decode users: %w", err)
 	}
 
 	if etag := resp.Header.Get("ETag"); etag != "" {

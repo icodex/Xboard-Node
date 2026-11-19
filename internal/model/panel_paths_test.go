@@ -143,3 +143,19 @@ func TestPathUnderRootFailsClosed(t *testing.T) {
 		t.Fatal("traversal must be rejected")
 	}
 }
+
+func TestSanitizePanelCertFiles(t *testing.T) {
+	const root = "/etc/xboard-node"
+	spec := panelPathSpec(t, root, &panel.NodeConfig{
+		CertConfig: &panel.CertConfig{CertFile: "/etc/shadow", KeyFile: root + "/tls/key.pem"},
+	})
+	if spec.CertConfig == nil {
+		t.Fatal("cert config dropped")
+	}
+	if spec.CertConfig.CertFile != "" {
+		t.Fatalf("out-of-root cert_file must be cleared, got %q", spec.CertConfig.CertFile)
+	}
+	if spec.CertConfig.KeyFile != root+"/tls/key.pem" {
+		t.Fatalf("in-root key_file must survive, got %q", spec.CertConfig.KeyFile)
+	}
+}

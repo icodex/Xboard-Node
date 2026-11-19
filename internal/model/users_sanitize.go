@@ -80,3 +80,17 @@ func SanitizeUserDeltas(users []UserSpec, action string, requireUUID bool) []Use
 	}
 	return SanitizeUserSpecs(users, requireUUID)
 }
+
+// SpeedLimitBytesPerSec converts Mbps to bytes/s with an overflow guard. The
+// naive int(mbps)*1_000_000/8 overflows for absurd panel values and yields a
+// negative rate, which blocks the user's connections forever.
+func SpeedLimitBytesPerSec(mbps int) int64 {
+	if mbps <= 0 {
+		return 0
+	}
+	const maxMbps = 8_000_000 // 8 Tbps; far above any NIC, keeps the product in int64
+	if mbps > maxMbps {
+		mbps = maxMbps
+	}
+	return int64(mbps) * 1_000_000 / 8
+}

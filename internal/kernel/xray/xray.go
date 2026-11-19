@@ -833,7 +833,7 @@ func (x *Xray) updateBandwidthLimits(users []model.UserSpec) {
 			bm.SetUserLimiter(email, fn(u.UUID))
 			continue
 		}
-		bps := int64(u.SpeedLimit) * 1_000_000 / 8
+		bps := model.SpeedLimitBytesPerSec(u.SpeedLimit)
 		bm.SetUserLimit(email, bps)
 	}
 }
@@ -851,7 +851,7 @@ func (x *Xray) applyBandwidthLimits(users []model.UserSpec) {
 			bm.SetUserLimiter(email, fn(u.UUID))
 			continue
 		}
-		bps := int64(u.SpeedLimit) * 1_000_000 / 8
+		bps := model.SpeedLimitBytesPerSec(u.SpeedLimit)
 		bm.SetUserLimit(email, bps)
 	}
 }

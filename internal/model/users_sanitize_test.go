@@ -57,3 +57,15 @@ func assertIDs(t *testing.T, users []UserSpec, want ...int) {
 		}
 	}
 }
+
+func TestSpeedLimitBytesPerSecOverflowGuard(t *testing.T) {
+	if got := SpeedLimitBytesPerSec(0); got != 0 {
+		t.Fatalf("unlimited = %d, want 0", got)
+	}
+	if got := SpeedLimitBytesPerSec(10); got != 1_250_000 {
+		t.Fatalf("10 Mbps = %d, want 1250000", got)
+	}
+	if got := SpeedLimitBytesPerSec(int(^uint(0) >> 1)); got != 1_000_000_000_000 {
+		t.Fatalf("overflow guard = %d, want 1e12", got)
+	}
+}

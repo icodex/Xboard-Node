@@ -33,6 +33,11 @@ kernel:
   # invalid connection", client EOF/mux disconnects) but also hides real kernel
   # errors (e.g. outbound DNS lookup failures). Keep unset unless log flood is a problem.
   # log_level: "warn"
+  # allow_plaintext_tls: false
+  # Only for deployments where an upstream proxy (nginx/CDN) terminates TLS:
+  # permits tls=1 vmess/vless/trojan inbounds to run without local certificate
+  # material. Without this flag a missing certificate is rejected instead of
+  # silently serving plaintext.
   # Kernel-native extensions, all optional. See docs-custom-*.md files.
   # custom_outbound: []        # raw kernel-native outbound objects
   # custom_route: []           # raw kernel-native route rule objects

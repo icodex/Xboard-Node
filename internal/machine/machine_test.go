@@ -489,3 +489,63 @@ func TestStopAllWaitsForDetachedNodes(t *testing.T) {
 		t.Fatalf("stopping map not cleared: %v", left)
 	}
 }
+
+// A hostile/corrupt discovery response must not start a service per entry.
+func TestRediscoverRejectsOversizedNodeList(t *testing.T) {
+	const n = maxMachineNodes + 1
+	nodes := make([]panel.MachineNode, n)
+	for i := range nodes {
+		nodes[i] = node(i + 1)
+	}
+	p := newPanelStub(t, nodes)
+	o := newTestOrchestrator(t, p)
+
+	o.rediscover(context.Background())
+
+	o.mu.Lock()
+	running := len(o.nodes)
+	o.mu.Unlock()
+	if running != 0 {
+		t.Fatalf("oversized node list started %d nodes", running)
+	}
+}
+
+// Shared-WS config events must be validated against the kernel each node
+// actually runs: an auto-switched node (xray) accepts h2 while sing-box does not.
+func TestMachineWSEventUsesPerNodeKernel(t *testing.T) {
+	p := newPanelStub(t, nil)
+	o := newTestOrchestrator(t, p)
+
+	mkMailbox := func(id int) *controlplane.NodeMailbox {
+		mb := controlplane.NewNodeMailbox()
+		mb.MarkReady()
+		o.eventsMu.Lock()
+		o.mailboxes[id] = mb
+		o.eventsMu.Unlock()
+		return mb
+	}
+	xrayMB := mkMailbox(7)
+	singboxMB := mkMailbox(8)
+
+	o.mu.Lock()
+	o.nodeKernels = map[int]config.KernelConfig{7: {Type: "xray"}}
+	o.mu.Unlock()
+
+	event := panel.WSEvent{
+		Type:   panel.WSEventSyncConfig,
+		NodeID: 7,
+		Config: &panel.NodeConfig{Protocol: "vless", Network: "kcp", ServerPort: 443},
+	}
+	o.onWSEvent(event)
+	if st := xrayMB.DrainIfReady(); !st.HasConfig {
+		t.Fatal("xray node must accept a kcp config over the shared WS")
+	}
+
+	// Without a per-node entry the machine-level kernel (sing-box) is used and
+	// the transport is rejected.
+	event.NodeID = 8
+	o.onWSEvent(event)
+	if st := singboxMB.DrainIfReady(); st.HasConfig {
+		t.Fatal("sing-box node must reject kcp")
+	}
+}

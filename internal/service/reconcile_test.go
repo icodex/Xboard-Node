@@ -9,6 +9,7 @@ import (
 
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/controlplane"
+	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/model"
 )
 
@@ -282,5 +283,79 @@ func TestPullSkipsUnchangedConfig(t *testing.T) {
 	}
 	if len(result.users) != 1 || result.userHash == "" {
 		t.Fatalf("users/hash missing: %v %q", result.users, result.userHash)
+	}
+}
+
+// tls=1 promises TLS to clients; without certificate material the inbound must
+// not silently run plaintext. The local allow_plaintext_tls flag is the explicit
+// opt-out for upstream TLS termination.
+func TestValidateTLSRequirementsFailsClosed(t *testing.T) {
+	spec := &model.NodeSpec{Protocol: "vless", TLS: 1, ServerPort: 443}
+	cfg := &config.Config{Kernel: config.KernelConfig{Type: "singbox"}}
+	if err := validateNodeRuntime(cfg, []string{"vless"}, spec, kernel.TLSCert{}); err == nil {
+		t.Fatal("vless tls=1 without a certificate must be rejected")
+	}
+
+	cfg.Kernel.AllowPlaintextTLS = true
+	if err := validateNodeRuntime(cfg, []string{"vless"}, spec, kernel.TLSCert{}); err != nil {
+		t.Fatalf("explicit plaintext opt-out must be honored: %v", err)
+	}
+
+	// QUIC protocols cannot be terminated upstream: still rejected.
+	hy := &model.NodeSpec{Protocol: "hysteria", Version: 2, ServerPort: 443}
+	if err := validateNodeRuntime(cfg, []string{"hysteria"}, hy, kernel.TLSCert{}); err == nil {
+		t.Fatal("hysteria must still require a certificate")
+	}
+}
+
+func TestApplyChangesRestartsOnReloadError(t *testing.T) {
+	k := &fakeKernel{running: true, reloadErr: errors.New("bad routes")}
+	svc := newTestService(k)
+	svc.lastConfig = &model.NodeSpec{Protocol: "vless", ServerPort: 1}
+	svc.lastUsers = []model.UserSpec{{ID: 1, UUID: "u1"}}
+
+	svc.applyChanges(context.Background(), true, false)
+
+	if k.startCalls == 0 {
+		t.Fatal("a reload error must restart the kernel instead of keeping old routes")
+	}
+}
+
+// A single user delta must update the derived indexes without a full rebuild.
+func TestApplyUserDeltaUpdatesIndexesIncrementally(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	svc.lastUsers = []model.UserSpec{{ID: 1, UUID: "u1", DeviceLimit: 2}}
+	svc.limiter.UpdateUsers(svc.lastUsers)
+	svc.speedTracker.UpdateBuckets()
+
+	svc.applyUserDelta(context.Background(), "add", []model.UserSpec{{ID: 2, UUID: "u2", DeviceLimit: 4}})
+	if len(svc.lastUsers) != 2 {
+		t.Fatalf("lastUsers = %v", svc.lastUsers)
+	}
+	if limit, ok := svc.limiter.GetDeviceLimitByUUID("u2"); !ok || limit != 4 {
+		t.Fatalf("new user limit = %d/%v", limit, ok)
+	}
+	if svc.lastUserHash != computeUserHash(svc.lastUsers) {
+		t.Fatal("hash not refreshed for the delta")
+	}
+
+	svc.applyUserDelta(context.Background(), "remove", []model.UserSpec{{ID: 1, UUID: "u1"}})
+	if len(svc.lastUsers) != 1 || svc.lastUsers[0].ID != 2 {
+		t.Fatalf("after remove: %v", svc.lastUsers)
+	}
+	if _, ok := svc.limiter.GetDeviceLimitByUUID("u1"); ok {
+		t.Fatal("removed user still resolves a limit")
+	}
+}
+
+// Callers that already computed the hash must not pay for it again.
+func TestPrepareUserStateUsesKnownHash(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	_, prevHash := svc.prepareUserState([]model.UserSpec{{ID: 1, UUID: "u1"}}, "known-hash")
+	if prevHash != "" {
+		t.Fatalf("prevHash = %q, want empty on first call", prevHash)
+	}
+	if svc.lastUserHash != "known-hash" {
+		t.Fatalf("hash = %q, want known-hash", svc.lastUserHash)
 	}
 }

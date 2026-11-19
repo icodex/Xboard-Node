@@ -230,3 +230,24 @@ func TestGetConfig_TransportErrorDropsToken(t *testing.T) {
 		t.Fatalf("error leaks the panel token: %v", err)
 	}
 }
+
+// Legacy panels send numbers as strings; the REST user path must accept them
+// like the WS path does, otherwise startup fails permanently.
+func TestGetUsers_WeakDecodeLegacyStrings(t *testing.T) {
+	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"users": []any{map[string]any{
+				"id": "5", "uuid": "uuid-5", "speed_limit": "10", "device_limit": "2",
+			}},
+		})
+	})
+	defer ts.Close()
+
+	users, err := client.GetUsers()
+	if err != nil {
+		t.Fatalf("GetUsers: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != 5 || users[0].SpeedLimit != 10 || users[0].DeviceLimit != 2 {
+		t.Fatalf("users = %+v", users)
+	}
+}

@@ -225,10 +225,12 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 
 	// Update routing rules
 	if err := router.UpdateRules(opts.Route.Rules, opts.Route.RuleSet); err != nil {
-		nlog.Core().Debug("routing reload failed", "error", err)
-	} else {
-		nlog.Core().Debug("sing-box routing reloaded")
+		// Returning the error makes the service restart the kernel; silently
+		// keeping the old routes while the new config is marked applied would
+		// leave the panel's routing change ineffective until the next restart.
+		return fmt.Errorf("update routing rules: %w", err)
 	}
+	nlog.Core().Debug("sing-box routing reloaded")
 
 	nopFactory := singLog.NewNOPFactory()
 

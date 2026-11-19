@@ -225,10 +225,10 @@ func (w *WSClient) Run(ctx context.Context) {
 		err := w.connect(ctx)
 
 		wasConnected := w.connected.Swap(false)
-		// Exactly one status notification per attempt: the previous code also
-		// notified inside the error branch, so every failed reconnect fired two
-		// REST pulls and two log lines.
-		if wasConnected || err != nil {
+		// Notify only on a real transition. Every failed retry used to fire a
+		// status event, and in machine mode that made N nodes hit the panel with
+		// 2 requests per backoff round while it was already unhealthy.
+		if wasConnected {
 			w.notifyStatus(false)
 		}
 		if err != nil {

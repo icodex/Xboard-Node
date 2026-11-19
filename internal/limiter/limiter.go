@@ -45,6 +45,36 @@ func (l *Limiter) UpdateUsers(users []model.UserSpec) {
 	l.uuidDeviceLimit = idx
 }
 
+// UpdateUsersDelta applies the users a panel delta touched without rebuilding
+// both maps. Removals only carry IDs; UUID-index entries are cleared from the
+// stored spec.
+func (l *Limiter) UpdateUsersDelta(upserts []model.UserSpec, removedIDs []int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for _, id := range removedIDs {
+		old, ok := l.users[id]
+		if !ok {
+			continue
+		}
+		if old.DeviceLimit > 0 {
+			delete(l.uuidDeviceLimit, old.UUID)
+		}
+		delete(l.users, id)
+	}
+	for _, u := range upserts {
+		if old, ok := l.users[u.ID]; ok && old.DeviceLimit > 0 && old.UUID != u.UUID {
+			delete(l.uuidDeviceLimit, old.UUID)
+		}
+		if u.DeviceLimit > 0 {
+			l.uuidDeviceLimit[u.UUID] = u.DeviceLimit
+		} else {
+			delete(l.uuidDeviceLimit, u.UUID)
+		}
+		l.users[u.ID] = u
+	}
+}
+
 // GetDeviceLimitByUUID returns the device limit for a user identified by UUID.
 // Returns (limit, true) if a device limit is set, (0, false) otherwise.
 // This is designed to be passed as a function reference to kernel.SetDeviceLimitFunc.

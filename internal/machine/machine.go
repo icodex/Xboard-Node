@@ -41,6 +41,9 @@ type Orchestrator struct {
 	// not exited yet. A restarted node with the same ID waits on it before the
 	// kernel binds ports again; stopAll drains whatever remains.
 	stopping map[int]<-chan struct{}
+	// nodeKernels holds each node's resolved kernel config so shared-WS events
+	// are translated with the kernel that node actually runs (auto-switch).
+	nodeKernels map[int]config.KernelConfig
 
 	// Per-node mailbox keyed by node_id. Shared WS events are aggregated here
 	// and each node service drains the latest state when ready.
@@ -182,6 +185,13 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 				nodeCfg.Kernel.Type = resolved
 			}
 		}
+		o.mu.Lock()
+		if o.nodeKernels == nil {
+			o.nodeKernels = make(map[int]config.KernelConfig)
+		}
+		o.nodeKernels[mn.ID] = nodeCfg.Kernel
+		o.mu.Unlock()
+
 		// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
 		perNodeClient.ResetConfigETag()
 
@@ -234,6 +244,7 @@ func (o *Orchestrator) detachNode(nodeID int) *nodeHandle {
 		return nil
 	}
 	delete(o.nodes, nodeID)
+	delete(o.nodeKernels, nodeID)
 	if o.stopping == nil {
 		o.stopping = make(map[int]<-chan struct{})
 	}
@@ -316,6 +327,9 @@ func (o *Orchestrator) stopAll() {
 	}
 }
 
+// maxMachineNodes bounds one discovery response; each entry becomes a service.
+const maxMachineNodes = 1024
+
 // ─── Node discovery ──────────────────────────────────────────────────────
 
 func (o *Orchestrator) rediscover(ctx context.Context) {
@@ -329,6 +343,14 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 	nodesResp, err := o.client.GetMachineNodes()
 	if err != nil {
 		nlog.Core().Warn("machine node discovery failed", "error", err)
+		return
+	}
+
+	if len(nodesResp.Nodes) > maxMachineNodes {
+		// A corrupt or hostile node list would otherwise be applied wholesale:
+		// one kernel, listener and goroutine per entry.
+		nlog.Core().Error("machine node list exceeds the cap, keeping the current set",
+			"nodes", len(nodesResp.Nodes), "cap", maxMachineNodes)
 		return
 	}
 
@@ -443,7 +465,7 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 		return
 	}
 
-	translated, err := controlplane.TranslateWSEvent(event, o.cfg.Kernel)
+	translated, err := controlplane.TranslateWSEvent(event, o.kernelForNode(nodeID))
 	if err != nil {
 		nlog.Core().Warn("machine ws event translation failed",
 			"type", event.Type, "node_id", nodeID, "error", err)
@@ -484,6 +506,21 @@ func (o *Orchestrator) unregisterNode(nodeID int) {
 	delete(o.mailboxes, nodeID)
 	delete(o.statuses, nodeID)
 	o.eventsMu.Unlock()
+
+	o.mu.Lock()
+	delete(o.nodeKernels, nodeID)
+	o.mu.Unlock()
+}
+
+// kernelForNode returns the resolved kernel config for a node, falling back to
+// the machine-level config before the node has started.
+func (o *Orchestrator) kernelForNode(nodeID int) config.KernelConfig {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if kcfg, ok := o.nodeKernels[nodeID]; ok {
+		return kcfg
+	}
+	return o.cfg.Kernel
 }
 
 func (o *Orchestrator) applyIntervals(bc panel.MachineBaseConfig) {

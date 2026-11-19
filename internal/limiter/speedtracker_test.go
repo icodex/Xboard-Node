@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/model"
+	"golang.org/x/time/rate"
 )
 
 func TestSpeedTracker_UpdateBuckets(t *testing.T) {
@@ -143,5 +144,29 @@ func TestSpeedTracker_UpdateBuckets_LogCallbackMayCallLimitedUserCount(t *testin
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("deadlock: UpdateBuckets did not finish (log callback vs RWMutex)")
+	}
+}
+
+func TestUpdateBucketsDelta(t *testing.T) {
+	l := New()
+	st := NewSpeedTracker(l)
+	l.UpdateUsers([]model.UserSpec{{ID: 1, UUID: "a", SpeedLimit: 10}})
+	st.UpdateBuckets()
+
+	lim := st.GetLimiter("a")
+	if lim == nil {
+		t.Fatal("bucket missing for limited user")
+	}
+
+	l.UpdateUsersDelta([]model.UserSpec{{ID: 1, UUID: "a", SpeedLimit: 20}}, nil)
+	st.UpdateBucketsDelta([]model.UserSpec{{ID: 1, UUID: "a", SpeedLimit: 20}}, nil)
+	if got, want := lim.Limit(), rate.Limit(model.SpeedLimitBytesPerSec(20)); got != want {
+		t.Fatalf("limit = %v, want %v", got, want)
+	}
+
+	l.UpdateUsersDelta(nil, []int{1})
+	st.UpdateBucketsDelta(nil, []int{1})
+	if st.GetLimiter("a") != nil {
+		t.Fatal("removed user must not resolve a limiter")
 	}
 }

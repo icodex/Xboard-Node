@@ -55,3 +55,28 @@ func TestGetDeviceLimitByUUID(t *testing.T) {
 		t.Error("expected (_, false) for unknown UUID")
 	}
 }
+
+func TestUpdateUsersDelta(t *testing.T) {
+	l := New()
+	l.UpdateUsers([]model.UserSpec{
+		{ID: 1, UUID: "a", DeviceLimit: 2},
+		{ID: 2, UUID: "b", DeviceLimit: 1},
+	})
+
+	l.UpdateUsersDelta([]model.UserSpec{
+		{ID: 2, UUID: "b", DeviceLimit: 3},
+		{ID: 3, UUID: "c", DeviceLimit: 0},
+	}, nil)
+
+	if got, ok := l.GetDeviceLimitByUUID("b"); !ok || got != 3 {
+		t.Fatalf("b limit = %d/%v, want 3", got, ok)
+	}
+	if got, ok := l.GetDeviceLimitByUUID("a"); !ok || got != 2 {
+		t.Fatalf("a limit lost: %d/%v", got, ok)
+	}
+
+	l.UpdateUsersDelta(nil, []int{1})
+	if _, ok := l.GetDeviceLimitByUUID("a"); ok {
+		t.Fatal("removed user's UUID must not resolve")
+	}
+}

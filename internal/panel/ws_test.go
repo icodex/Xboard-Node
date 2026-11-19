@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -692,5 +693,28 @@ func TestSendDeviceReportReturnsFalseWhenChannelUnavailable(t *testing.T) {
 	ws.writeCh.Store(nil)
 	if ws.SendDeviceReportForNode(0, map[int][]string{1: {"1.1.1.1"}}) {
 		t.Fatal("missing write channel must report not enqueued")
+	}
+}
+
+// Repeated failed reconnects must not emit status events: machine mode fans
+// each event out to every node, which turned a panel outage into a request
+// storm.
+func TestWSClient_DoesNotNotifyOnRepeatedFailedAttempts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	var notifications atomic.Int32
+	ws := NewWSClient("ws://"+strings.TrimPrefix(server.URL, "http://"), "t", 1,
+		WSClientConfig{BackoffInitial: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond},
+		nil, func(WSStatusChange) { notifications.Add(1) }, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	ws.Run(ctx)
+
+	if got := notifications.Load(); got != 0 {
+		t.Fatalf("failed reconnect attempts emitted %d status events, want 0", got)
 	}
 }

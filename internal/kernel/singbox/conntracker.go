@@ -421,6 +421,7 @@ type trackedConn struct {
 	sourceIP string
 	limiter  *rate.Limiter
 	ctx      context.Context
+	timer    *time.Timer
 	closed   atomic.Bool
 }
 
@@ -428,7 +429,7 @@ type trackedConn struct {
 // larger than the burst are split into burst-sized chunks: one ReserveN(n)
 // with n > burst yields an infinite delay and would stall the connection
 // until it is cancelled.
-func waitLimit(ctx context.Context, lim *rate.Limiter, n int) error {
+func waitLimit(ctx context.Context, lim *rate.Limiter, n int, timer **time.Timer) error {
 	if lim == nil || n <= 0 {
 		return nil
 	}
@@ -444,11 +445,23 @@ func waitLimit(ctx context.Context, lim *rate.Limiter, n int) error {
 		if !lim.AllowN(time.Now(), chunk) {
 			resv := lim.ReserveN(time.Now(), chunk)
 			if delay := resv.Delay(); delay > 0 {
-				timer := time.NewTimer(delay)
+				// Reuse one timer per connection: steady-state rate limiting
+				// allocates a timer per packet otherwise.
+				if *timer == nil {
+					*timer = time.NewTimer(delay)
+				} else {
+					if !(*timer).Stop() {
+						select {
+						case <-(*timer).C:
+						default:
+						}
+					}
+					(*timer).Reset(delay)
+				}
 				select {
-				case <-timer.C:
+				case <-(*timer).C:
 				case <-ctx.Done():
-					timer.Stop()
+					(*timer).Stop()
 					resv.Cancel()
 					return ctx.Err()
 				}
@@ -471,7 +484,7 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 			c.us.upload.Add(int64(n)) // 从入站读取 = 用户上传
 		}
 		if c.limiter != nil {
-			if werr := waitLimit(c.ctx, c.limiter, n); werr != nil {
+			if werr := waitLimit(c.ctx, c.limiter, n, &c.timer); werr != nil {
 				return n, werr
 			}
 		}
@@ -497,7 +510,7 @@ func (c *trackedConn) Write(b []byte) (int, error) {
 		if burst := c.limiter.Burst(); burst > 0 && chunk > burst {
 			chunk = burst
 		}
-		if err := waitLimit(c.ctx, c.limiter, chunk); err != nil {
+		if err := waitLimit(c.ctx, c.limiter, chunk, &c.timer); err != nil {
 			return written, err
 		}
 		n, err := c.Conn.Write(b[:chunk])
@@ -535,7 +548,7 @@ func (c *trackedConn) makeCountFunc(counter *atomic.Int64) N.CountFunc {
 	}
 	return func(n int64) {
 		counter.Add(n)
-		_ = waitLimit(c.ctx, c.limiter, int(n))
+		_ = waitLimit(c.ctx, c.limiter, int(n), &c.timer)
 	}
 }
 
@@ -567,6 +580,7 @@ type trackedPacketConn struct {
 	sourceIP string
 	limiter  *rate.Limiter
 	ctx      context.Context
+	timer    *time.Timer
 	closed   atomic.Bool
 }
 
@@ -578,7 +592,7 @@ func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (singM.Socksaddr, err
 			c.us.upload.Add(n) // 从入站读取 = 用户上传
 		}
 		if c.limiter != nil {
-			if werr := waitLimit(c.ctx, c.limiter, int(n)); werr != nil {
+			if werr := waitLimit(c.ctx, c.limiter, int(n), &c.timer); werr != nil {
 				return dest, werr
 			}
 		}
@@ -591,7 +605,7 @@ func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, dest singM.Socksaddr
 
 	// Apply rate limiting before write
 	if c.limiter != nil {
-		if err := waitLimit(c.ctx, c.limiter, int(n)); err != nil {
+		if err := waitLimit(c.ctx, c.limiter, int(n), &c.timer); err != nil {
 			return err
 		}
 	}
@@ -618,7 +632,7 @@ func (c *trackedPacketConn) makeCountFunc(counter *atomic.Int64) N.CountFunc {
 	}
 	return func(n int64) {
 		counter.Add(n)
-		_ = waitLimit(c.ctx, c.limiter, int(n))
+		_ = waitLimit(c.ctx, c.limiter, int(n), &c.timer)
 	}
 }
 

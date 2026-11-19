@@ -122,6 +122,11 @@ type KernelConfig struct {
 	ConfigDir string `yaml:"config_dir"`
 	LogLevel  string `yaml:"log_level"`
 
+	// AllowPlaintextTLS permits an inbound with panel tls=1 to run without TLS
+	// when an upstream proxy (nginx/CDN) terminates it. Off by default: a
+	// missing certificate must fail closed, not silently serve plaintext.
+	AllowPlaintextTLS bool `yaml:"allow_plaintext_tls"`
+
 	// LogOutput mirrors Log.Output (filled in setDefaultsFrom, not
 	// user-facing). Kernels that log outside nlog (xray error log) use it
 	// to honor the log.output setting.

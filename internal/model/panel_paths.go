@@ -24,6 +24,7 @@ func sanitizePanelPaths(n *NodeSpec, configDir string) {
 	}
 	sanitizePanelMasquerade(n, configDir)
 	sanitizePanelECHKeyPath(n, configDir)
+	sanitizePanelCertFiles(n, configDir)
 }
 
 func sanitizePanelMasquerade(n *NodeSpec, configDir string) {
@@ -84,6 +85,24 @@ func sanitizePanelECHKeyPath(n *NodeSpec, configDir string) {
 	}
 	n.TLSSettings["ech"] = cloned
 	nlog.Core().Warn("panel ECH key_path is outside the node config dir, using the inline key", "key_path", keyPath)
+}
+
+// sanitizePanelCertFiles confines panel-supplied certificate paths to the node
+// config dir, like ECH keys: a panel path must not become an arbitrary file
+// read primitive.
+func sanitizePanelCertFiles(n *NodeSpec, configDir string) {
+	if n.CertConfig == nil {
+		return
+	}
+	clearIfOutside := func(path *string, name string) {
+		if *path == "" || pathUnderRoot(*path, configDir, true) {
+			return
+		}
+		nlog.Core().Warn("panel certificate path is outside the node config dir, ignoring", "field", name, "path", *path)
+		*path = ""
+	}
+	clearIfOutside(&n.CertConfig.CertFile, "cert_file")
+	clearIfOutside(&n.CertConfig.KeyFile, "key_file")
 }
 
 // pathUnderRoot reports whether path resolves inside root. allowRoot controls
