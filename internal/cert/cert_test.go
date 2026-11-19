@@ -375,3 +375,27 @@ func TestTearDownACME_KeepsMaterial(t *testing.T) {
 		t.Fatal("TLSCert changed after tear-down")
 	}
 }
+
+// A service instance that fails setup is rebuilt by runNodeService on the same
+// daemon context; a no-op Stop left one certmagic cache + renewal goroutine
+// behind per retry.
+func TestManagerStopCancelsACME(t *testing.T) {
+	certPEM, keyPEM := generateSelfSignedPair(t, "stop.test")
+	m := NewManager(config.CertConfig{CertMode: "dns", Domain: "stop.test"})
+	m.mat.Store(&certMaterial{certPEM: certPEM, keyPEM: keyPEM})
+	canceled := false
+	m.acmeStarted = true
+	m.acmeCancel = func() { canceled = true }
+
+	m.Stop()
+
+	if !canceled {
+		t.Fatal("Stop must cancel ACME maintenance")
+	}
+	if m.acmeStarted || m.acmeCancel != nil {
+		t.Fatal("Stop must clear ACME state")
+	}
+	if !m.HasCert() {
+		t.Fatal("Stop must keep the in-memory cert material")
+	}
+}

@@ -88,7 +88,10 @@ func validateStructuredRawRule(rule map[string]any, prefix, kernelType string, a
 			return false, fmt.Sprintf("%s: action.target is required when action.type is route", prefix)
 		}
 		if availableTags != nil {
-			if _, ok := availableTags[strings.ToLower(target)]; !ok {
+			// Kernel tag matching is case-sensitive: a lowercased lookup would
+			// accept a reference the kernel can never resolve, and the whole
+			// kernel config is then rejected.
+			if _, ok := availableTags[target]; !ok {
 				return false, fmt.Sprintf("%s: action.target references unknown outbound %q", prefix, parsed.Action.Target)
 			}
 		}

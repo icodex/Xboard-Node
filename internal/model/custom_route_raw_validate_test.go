@@ -164,3 +164,39 @@ func TestSanitizeRawCustomRoutes_KeepsAndDrops(t *testing.T) {
 		})
 	}
 }
+
+// Tag references are resolved case-sensitively by both kernels; accepting a
+// case-folded target let the whole kernel config be rejected later.
+func TestSanitizeRawCustomRoutes_TargetIsCaseSensitive(t *testing.T) {
+	raw := []map[string]any{{
+		"match":  map[string]any{"domains": []any{"x.example"}},
+		"action": map[string]any{"type": "route", "target": "mytag"},
+	}}
+	nc := &panel.NodeConfig{
+		Protocol:   "shadowsocks",
+		Cipher:     "aes-256-gcm",
+		ServerPort: 8388,
+		CustomOutbounds: []panel.OutboundConfig{{
+			Tag:      "MyTag",
+			Protocol: "socks",
+			Settings: map[string]any{"address": "1.2.3.4", "port": 1080},
+		}},
+		CustomRoutes: raw,
+	}
+	spec, err := NodeSpecFromPanelValidated(nc, config.KernelConfig{Type: "singbox"})
+	if err != nil {
+		t.Fatalf("raw routes must never fail the node: %v", err)
+	}
+	if len(spec.CustomRoutes) != 0 {
+		t.Fatalf("case-folded target must be dropped, kept %d", len(spec.CustomRoutes))
+	}
+
+	nc.CustomRoutes[0]["action"].(map[string]any)["target"] = "MyTag"
+	spec, err = NodeSpecFromPanelValidated(nc, config.KernelConfig{Type: "singbox"})
+	if err != nil {
+		t.Fatalf("exact target must validate: %v", err)
+	}
+	if len(spec.CustomRoutes) != 1 {
+		t.Fatalf("exact target must be kept, kept %d", len(spec.CustomRoutes))
+	}
+}

@@ -359,9 +359,13 @@ func (m *Manager) start(ctx, lifetimeCtx context.Context) error {
 	}
 }
 
-// Stop is a no-op: certmagic's background goroutine is cancelled via the
-// context passed to ManageAsync.
-func (m *Manager) Stop() {}
+// Stop cancels ACME maintenance so a failed service instance does not leave a
+// certmagic cache and renewal goroutine behind until the daemon context ends;
+// runNodeService rebuilds the service on setup errors and would otherwise
+// accumulate one per retry. The manager must not be reused after Stop.
+func (m *Manager) Stop() {
+	m.tearDownACME()
+}
 
 // ─── Mode: file ────────────────────────────────────────────────────────────
 
