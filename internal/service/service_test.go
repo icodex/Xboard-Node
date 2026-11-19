@@ -760,3 +760,32 @@ func TestApplyNodeCertSameSelfConfigIsIdempotent(t *testing.T) {
 		t.Fatal("identical cert config must not regenerate the certificate")
 	}
 }
+
+// Shutdown while Reconfigure is in flight: cancellation must end the worker
+// without delivering a stale update, and release the counter.
+func TestCertWorkerCancelledMidReconfigure(t *testing.T) {
+	s := newTestService(&fakeKernel{running: true})
+	started := make(chan struct{})
+	s.certReconfigure = func(ctx context.Context, _ config.CertConfig) (bool, error) {
+		close(started)
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.startCertReconfigure(ctx, config.CertConfig{CertMode: "self"})
+	<-started
+	cancel()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.certWorkers.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.certWorkers.Load(); got != 0 {
+		t.Fatalf("certWorkers = %d after cancellation, want 0", got)
+	}
+	select {
+	case upd := <-s.certUpdates:
+		t.Fatalf("unexpected update after cancellation: %+v", upd)
+	default:
+	}
+}
