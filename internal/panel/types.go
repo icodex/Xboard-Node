@@ -157,22 +157,6 @@ type NodeConfig struct {
 	AcceptProxyProtocol bool `json:"accept_proxy_protocol,omitempty"`
 }
 
-// GetProxyProtocol returns true if AcceptProxyProtocol is set either at node level
-// or in networkSettings (for panel compatibility).
-func (nc *NodeConfig) GetProxyProtocol() bool {
-	if nc.AcceptProxyProtocol {
-		return true
-	}
-	if nc.NetworkSettings != nil {
-		if v, ok := nc.NetworkSettings["acceptProxyProtocol"]; ok {
-			if b, ok := v.(bool); ok {
-				return b
-			}
-		}
-	}
-	return false
-}
-
 // SniffConfig mirrors the panel's protocol_settings.sniff object.
 type SniffConfig struct {
 	Enable        bool   `json:"enable,omitempty"`

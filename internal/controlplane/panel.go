@@ -31,10 +31,9 @@ func NewPanelControlPlane(panelCfg config.PanelConfig, wsCfg config.WSConfig, kc
 	}
 }
 
-func (p *PanelControlPlane) SupportsPolling() bool       { return true }
-func (p *PanelControlPlane) SupportsDiscovery() bool     { return true }
-func (p *PanelControlPlane) SupportsReporting() bool     { return true }
-func (p *PanelControlPlane) SupportsDeviceReports() bool { return true }
+func (p *PanelControlPlane) SupportsPolling() bool   { return true }
+func (p *PanelControlPlane) SupportsDiscovery() bool { return true }
+func (p *PanelControlPlane) SupportsReporting() bool { return true }
 
 func (p *PanelControlPlane) Initial(ctx context.Context, metricsFn func() map[string]interface{}, events chan<- Event, statuses chan<- StatusChange) (Bootstrap, error) {
 	hs, err := p.client.Handshake()

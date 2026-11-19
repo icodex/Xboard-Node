@@ -77,7 +77,8 @@ log:
   # ([core] / node-prefixed lines) AND both kernels. sing-box kernel logs are
   # routed through this logger; inbound-connection ERROR noise (scanner
   # probes, auth failures) is downgraded to WARN automatically.
-  # Accepted: debug/info/warn/error/fatal (default: info; fatal = near-silent).
+  # Accepted: debug/info/warn/error/fatal (default: info; fatal still prints
+  # ERROR app logs, but silences sing-box kernel noise entirely).
   level: "info"
   # Output: stdout/stderr or a file path. Applies to app logs, sing-box kernel
   # logs, and the xray error log (access log stays off).

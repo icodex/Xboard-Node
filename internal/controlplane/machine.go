@@ -40,10 +40,9 @@ func NewMachinePanelControlPlane(
 	}
 }
 
-func (p *MachinePanelControlPlane) SupportsPolling() bool       { return true }
-func (p *MachinePanelControlPlane) SupportsDiscovery() bool     { return false }
-func (p *MachinePanelControlPlane) SupportsReporting() bool     { return true }
-func (p *MachinePanelControlPlane) SupportsDeviceReports() bool { return p.push != nil }
+func (p *MachinePanelControlPlane) SupportsPolling() bool   { return true }
+func (p *MachinePanelControlPlane) SupportsDiscovery() bool { return false }
+func (p *MachinePanelControlPlane) SupportsReporting() bool { return true }
 
 func (p *MachinePanelControlPlane) Initial(
 	ctx context.Context,

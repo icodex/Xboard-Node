@@ -96,7 +96,9 @@ keys AND):
 | `source` | `source_ip_cidr` | CIDR or bare IP, no geo codes |
 | `sourcePort` | `source_port` + `source_port_range` | same formats as `port` |
 
-Rejected keys and values (validation error, key named):
+Rejected by the **sing-box translation** (validation error, key named).
+The xray-native shape above is passed through verbatim, so on the xray kernel
+these keys remain legal:
 
 - Unknown keys: `balancerTag`, `inboundTag`, `protocol`, `attributes`, `user`, `sourceGeoIP`, `sourceGeosite`, and anything else outside the table above
 - `geosite:` / `ext:` / `geoip:` values (other than `geoip:private`): the sing-box kernel removed geo databases; use the xray kernel, or a `kernel.custom_route` rule-set entry

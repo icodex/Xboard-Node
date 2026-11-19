@@ -217,3 +217,29 @@ func TestAutoSwitchStopsOldKernelBeforeReturning(t *testing.T) {
 		t.Fatal("ensureKernelResolved did not finish")
 	}
 }
+
+// A REST snapshot with an invalid node config must not be applied, while its
+// user list still converges: otherwise a bad config would block user updates
+// until the panel fixes the config.
+func TestApplyPullResultRejectsInvalidConfigButAppliesUsers(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	svc.cfg = &config.Config{Kernel: config.KernelConfig{Type: "singbox"}}
+
+	users := []model.UserSpec{{ID: 1, UUID: "u1"}}
+	hash := computeUserHash(users)
+	invalid := &model.NodeSpec{Protocol: "not-a-protocol", ServerPort: 1}
+
+	svc.applyPullResult(context.Background(), pullResult{
+		config:     invalid,
+		configHash: "bad-config",
+		users:      users,
+		userHash:   hash,
+	})
+
+	if svc.lastConfig != nil || svc.lastConfigHash != "" {
+		t.Fatalf("invalid config was applied: %+v hash=%q", svc.lastConfig, svc.lastConfigHash)
+	}
+	if len(svc.lastUsers) != 1 || svc.lastUserHash != hash {
+		t.Fatalf("users not applied: %v hash=%q want %q", svc.lastUsers, svc.lastUserHash, hash)
+	}
+}

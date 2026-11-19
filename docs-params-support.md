@@ -86,7 +86,7 @@ caught.
 | Key | sing-box | xray |
 |-----|----------|------|
 | `tls=2` Reality (vless/trojan) | ✅ | ✅ |
-| vmess + Reality (tls=2) | ⚠️ plaintext inbound + warn (kernel auto-select picks xray) | ✅ |
+| vmess + Reality (tls=2) | ❌ rejected at validation on explicit sing-box (auto mode resolves to xray) | ✅ |
 | `tls_settings.alpn` | ✅ verbatim (naive defaults h2, hysteria/tuic default h3) | ✅ |
 | `tls_settings.ech.*` | ✅ key / key_path | ✅ echServerKeys |
 | vless `decryption` (encryption) | ⚠️ none/unsupported + warn | ✅ |

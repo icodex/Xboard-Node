@@ -129,7 +129,7 @@ func ResolveKernelForTransport(network, configuredKernel string) string {
 }
 
 // singboxOnlyProtocols lists protocols only the sing-box kernel serves.
-// Verified against the 31-node dual-kernel sweep (docs-protocol-support.md).
+// Verified against the 31-node dual-kernel sweep (docs-params-support.md).
 var singboxOnlyProtocols = map[string]bool{
 	"tuic":     true,
 	"anytls":   true,

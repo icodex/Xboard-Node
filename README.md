@@ -59,6 +59,9 @@ xbctl bind add-node --panel URL --token-file /root/xboard-token --node-id 1
 xbctl bind add-machine --panel URL --token-file /root/xboard-token --machine-id 1
 xbctl bind remove-node --panel URL --node-id 1
 xbctl service restart
+
+# Keep the token out of argv entirely (piped stdin, not a shell argument):
+printf '%s' "$TOKEN" | xbctl config init --mode node --panel-url URL --node-id 1 --token-stdin
 ```
 
 ## Configuration
@@ -72,7 +75,7 @@ Legacy identity overrides (`apiHost`/`apiKey`/`nodeID`, `DOMAIN`, `MACHINE_TOKEN
 - Custom routes: [docs-custom-routes.md](docs-custom-routes.md)
 - Custom outbounds: [docs-custom-outbounds.md](docs-custom-outbounds.md)
 - DNS providers (ACME DNS-01): [docs-dns-providers.md](docs-dns-providers.md)
-- Protocol/kernel support matrix: [docs-protocol-support.md](docs-protocol-support.md)
+- Protocol/kernel support matrix: [docs-params-support.md](docs-params-support.md)
 
 ## License
 
