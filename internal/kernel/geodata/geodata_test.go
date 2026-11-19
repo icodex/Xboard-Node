@@ -61,3 +61,29 @@ func TestAtomicDownloadConcurrentWritersProduceOneCompleteFile(t *testing.T) {
 		t.Fatalf("temp files left behind: %v", leftovers)
 	}
 }
+
+// A truncated body must fail without publishing the destination and must not
+// leave a temp file: ensureFile trusts any non-empty file, so a leftover would
+// be treated as a valid database forever.
+func TestAtomicDownloadRejectsUndersizedBody(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "geoip.dat")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte{'X'}, minGeoFileSize-1))
+	}))
+	defer srv.Close()
+
+	if err := atomicDownload(dst, srv.URL); err == nil {
+		t.Fatal("expected an error for an undersized download")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("destination must not be published, stat err = %v", err)
+	}
+	leftovers, err := filepath.Glob(dst + ".tmp.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temp files left behind: %v", leftovers)
+	}
+}
