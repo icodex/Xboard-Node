@@ -154,3 +154,20 @@ func TestStalePollDoesNotRollBackPushedUsers(t *testing.T) {
 		t.Fatalf("retry lost users: %v", svc.lastUsers)
 	}
 }
+
+func TestIntervalDurationClamps(t *testing.T) {
+	tests := []struct {
+		in   int
+		want time.Duration
+	}{
+		{0, time.Second},
+		{-5, time.Second},
+		{10, 10 * time.Second},
+		{1 << 40, 24 * time.Hour},
+	}
+	for _, tc := range tests {
+		if got := intervalDuration(tc.in); got != tc.want {
+			t.Fatalf("intervalDuration(%d) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}

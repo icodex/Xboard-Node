@@ -676,3 +676,29 @@ func TestExpandNodes_DerivesUniqueConfigDirWithKernelOverride(t *testing.T) {
 		t.Errorf("explicit config_dir = %q, want /tmp/explicit", got)
 	}
 }
+
+func TestLoadRoot_RejectsNegativeIntervals(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"track_interval", "node:\n  track_interval: -1"},
+		{"device_report_interval", "node:\n  device_report_interval: -1"},
+		{"status_interval", "ws:\n  status_interval: -1"},
+		{"discovery_interval", "ws:\n  discovery_interval: -1"},
+		{"backoff_initial", "ws:\n  backoff_initial: -1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTemp(t, tc.yaml+`
+panel:
+  url: "https://panel.example.com"
+  token: "tok"
+  node_id: 1
+`)
+			if _, err := LoadRoot(path); err == nil {
+				t.Fatalf("negative %s must be rejected", tc.name)
+			}
+		})
+	}
+}

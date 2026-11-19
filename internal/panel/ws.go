@@ -130,19 +130,34 @@ type WSClient struct {
 // NewWSClient creates a new WebSocket client.
 // wsURL is the base WebSocket URL (e.g. "ws://panel.example.com:8076").
 // token and nodeID are used for authentication via query parameters.
+const maxTickerInterval = 24 * time.Hour
+
+// NewWSClient applies defaults and clamps timings. The caller normally passes
+// validated config, but a non-positive StatusInterval panics time.NewTicker
+// and a negative BackoffInitial panics rand.Int64N; a huge value overflows
+// into a negative Duration. Fail safe here instead of trusting the caller.
 func NewWSClient(wsURL string, token string, nodeID int, cfg WSClientConfig, onEvent func(WSEvent), onStatus func(WSStatusChange), onPing func() map[string]interface{}) *WSClient {
 	// Apply defaults
-	if cfg.StatusInterval == 0 {
+	if cfg.StatusInterval <= 0 {
 		cfg.StatusInterval = 10 * time.Second
 	}
-	if cfg.HandshakeTimeout == 0 {
+	if cfg.StatusInterval > maxTickerInterval {
+		cfg.StatusInterval = maxTickerInterval
+	}
+	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 15 * time.Second
 	}
-	if cfg.BackoffInitial == 0 {
+	if cfg.BackoffInitial <= 0 {
 		cfg.BackoffInitial = time.Second
 	}
-	if cfg.BackoffMax == 0 {
+	if cfg.BackoffInitial > maxTickerInterval {
+		cfg.BackoffInitial = maxTickerInterval
+	}
+	if cfg.BackoffMax <= 0 {
 		cfg.BackoffMax = 60 * time.Second
+	}
+	if cfg.BackoffMax > maxTickerInterval {
+		cfg.BackoffMax = maxTickerInterval
 	}
 	return &WSClient{
 		wsURL:    wsURL,

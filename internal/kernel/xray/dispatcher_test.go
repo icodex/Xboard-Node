@@ -449,3 +449,38 @@ func TestLimitDispatcher_DeviceLimitRejectsLowerSortingNewIP(t *testing.T) {
 		t.Fatal("third IP must be rejected even though it sorts lower")
 	}
 }
+
+// Unlimited users used to leave one ipCounter per email forever: the map grew
+// with every user that ever connected and GetConnectionState scanned them all.
+func TestUnlimitedIPsReclaimedAfterDisconnect(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.UpdateLimits(map[string]int{email: 1}, nil)
+
+	ld.checkDeviceLimit(email, "1.1.1.1")
+	ld.checkDeviceLimit(email, "1.1.1.1")
+	ld.checkDeviceLimit(email, "2.2.2.2")
+	if _, ok := ld.unlimitedIPs.Load(email); !ok {
+		t.Fatal("unlimited entry missing while connections are live")
+	}
+
+	ld.delConn(email, "1.1.1.1")
+	ld.delConn(email, "1.1.1.1")
+	ld.delConn(email, "2.2.2.2")
+	if _, ok := ld.unlimitedIPs.Load(email); ok {
+		t.Fatal("unlimited entry must be reclaimed after the last connection closes")
+	}
+}
+
+// Entries orphaned by an admission/release race are swept on user sync.
+func TestUpdateLimitsSweepsIdleUnlimitedEntries(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(1)
+	ld.unlimitedIPs.Store(email, &ipCounter{}) // no live connections
+
+	ld.UpdateLimits(nil, nil)
+
+	if _, ok := ld.unlimitedIPs.Load(email); ok {
+		t.Fatal("idle unlimited entry must be swept")
+	}
+}

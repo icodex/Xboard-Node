@@ -630,3 +630,18 @@ func TestWSClient_DebugLogOmitsFramePayload(t *testing.T) {
 		t.Fatalf("expected data_len in ws debug log, got: %s", out)
 	}
 }
+
+// Negative timings used to reach time.NewTicker/rand.Int64N and panic the
+// whole process; the client must normalize them.
+func TestNewWSClientNormalizesInvalidTimings(t *testing.T) {
+	ws := NewWSClient("ws://example.invalid", "t", 1, WSClientConfig{
+		StatusInterval:   -time.Second,
+		HandshakeTimeout: -time.Second,
+		BackoffInitial:   -time.Second,
+		BackoffMax:       -time.Second,
+	}, nil, nil, nil)
+	if ws.cfg.StatusInterval <= 0 || ws.cfg.HandshakeTimeout <= 0 ||
+		ws.cfg.BackoffInitial <= 0 || ws.cfg.BackoffMax <= 0 {
+		t.Fatalf("negative timings not normalized: %+v", ws.cfg)
+	}
+}

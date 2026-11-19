@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,5 +180,36 @@ func TestPruneCredentialKeysKeepsSharedKeys(t *testing.T) {
 	}
 	if !strings.Contains(text, "OTHER=3") {
 		t.Fatalf("unrelated key was dropped: %s", text)
+	}
+}
+
+// A broken existing config must not be silently replaced by a root containing
+// only the new binding: that dropped every other instance.
+func TestConfigInitRefusesToOverwriteUnparsableConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	broken := []byte("panel: [this is not valid yaml\n")
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runConfigInit([]string{
+		"--config", path,
+		"--output", path,
+		"--mode", "node",
+		"--panel-url", "https://panel.example",
+		"--node-id", "7",
+		"--install-root", dir,
+	})
+	if err == nil {
+		t.Fatal("expected refusal to overwrite an unparsable config")
+	}
+
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, broken) {
+		t.Fatalf("config was rewritten:\n%s", got)
 	}
 }

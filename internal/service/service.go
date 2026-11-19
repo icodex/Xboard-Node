@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -137,6 +136,21 @@ type pullResult struct {
 	// gen is resyncGen when the poll started; it gates clearing the pending
 	// reconciliation flag.
 	gen uint64
+}
+
+// intervalDuration converts a seconds setting to a ticker-safe Duration.
+// time.NewTicker panics on <= 0, and multiplying a huge value overflows into
+// a negative Duration, so clamp both ends. Config validation rejects negative
+// local values; this also covers panel-provided and hot-reloaded ones.
+func intervalDuration(seconds int) time.Duration {
+	if seconds < 1 {
+		seconds = 1
+	}
+	const maxSeconds = 24 * 60 * 60
+	if seconds > maxSeconds {
+		seconds = maxSeconds
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // apiBackoff implements simple exponential backoff for API failures.
@@ -322,18 +336,22 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	defer s.stopCurrentKernel()
 
-	// Set up tickers
-	trackTicker := time.NewTicker(time.Duration(s.cfg.Node.TrackInterval) * time.Second)
-	pushInterval := time.Duration(math.Max(float64(s.pushInterval), 5)) * time.Second
-	pullInterval := time.Duration(s.pullInterval) * time.Second
-	reportTicker := time.NewTicker(pushInterval)
-	pullTicker := time.NewTicker(pullInterval)
-	deviceReportTicker := time.NewTicker(time.Duration(s.cfg.Node.DeviceReportInterval) * time.Second)
+	// Set up tickers. intervalDuration clamps, because config validation
+	// rejects negatives but panel-provided and hot-reloaded values still flow
+	// here, and NewTicker panics on <= 0.
+	pushSeconds := s.pushInterval
+	if pushSeconds < 5 {
+		pushSeconds = 5
+	}
+	trackTicker := time.NewTicker(intervalDuration(s.cfg.Node.TrackInterval))
+	reportTicker := time.NewTicker(intervalDuration(pushSeconds))
+	pullTicker := time.NewTicker(intervalDuration(s.pullInterval))
+	deviceReportTicker := time.NewTicker(intervalDuration(s.cfg.Node.DeviceReportInterval))
 
 	// WS discovery: when in REST-only mode, periodically re-handshake to check
 	// if WS has been enabled. When WS is disconnected for too long, re-check
 	// if it's still available.
-	wsDiscoveryTicker := time.NewTicker(time.Duration(s.cfg.WS.DiscoveryInterval) * time.Second)
+	wsDiscoveryTicker := time.NewTicker(intervalDuration(s.cfg.WS.DiscoveryInterval))
 
 	defer trackTicker.Stop()
 	defer reportTicker.Stop()

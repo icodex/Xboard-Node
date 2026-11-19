@@ -774,6 +774,25 @@ func (c *Config) validate() error {
 	if c.Node.PullInterval < 0 {
 		return fmt.Errorf("node.pull_interval must not be negative")
 	}
+	// Every interval below feeds time.NewTicker directly; a negative value
+	// panics the process (all instances in machine mode), and there is no
+	// recover() anywhere on that path.
+	for _, iv := range []struct {
+		name  string
+		value int
+	}{
+		{"node.track_interval", c.Node.TrackInterval},
+		{"node.device_report_interval", c.Node.DeviceReportInterval},
+		{"ws.status_interval", c.WS.StatusInterval},
+		{"ws.discovery_interval", c.WS.DiscoveryInterval},
+		{"ws.backoff_initial", c.WS.BackoffInitial},
+		{"ws.backoff_max", c.WS.BackoffMax},
+		{"ws.handshake_timeout", c.WS.HandshakeTimeout},
+	} {
+		if iv.value < 0 {
+			return fmt.Errorf("%s must not be negative", iv.name)
+		}
+	}
 	// Plaintext http is allowed (LAN panels exist) but must be a conscious
 	// choice: the token and every user credential cross the network in clear.
 	if u, err := url.Parse(strings.TrimSpace(c.Panel.URL)); err == nil && strings.EqualFold(u.Scheme, "http") {

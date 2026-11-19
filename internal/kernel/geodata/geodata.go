@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
@@ -86,7 +87,21 @@ func ensureFile(dir, name, url string) error {
 	return nil
 }
 
+// downloadLocks serialises downloads per destination path inside this process:
+// machine mode shares geo_data_dir across node instances that start together.
+var downloadLocks sync.Map // dst → *sync.Mutex
+
 func atomicDownload(dst, url string) error {
+	lockAny, _ := downloadLocks.LoadOrStore(dst, &sync.Mutex{})
+	mu := lockAny.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Another instance may have completed the download while we waited.
+	if fi, err := os.Stat(dst); err == nil && fi.Size() > 0 {
+		return nil
+	}
+
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return fmt.Errorf("http get %s: %w", url, err)
@@ -97,11 +112,15 @@ func atomicDownload(dst, url string) error {
 		return fmt.Errorf("unexpected HTTP status from %s: %s", url, resp.Status)
 	}
 
-	tmp := dst + ".tmp"
-	f, err := os.Create(tmp)
+	// Unique temp name: a fixed ".tmp" let two processes (shared geo_data_dir
+	// across node instances, or two daemons) interleave writes into one file,
+	// and the truncated result was never re-downloaded because ensureFile
+	// trusts any non-empty file.
+	f, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp.*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
+	tmp := f.Name()
 	defer os.Remove(tmp)
 
 	if _, err := io.Copy(f, resp.Body); err != nil {

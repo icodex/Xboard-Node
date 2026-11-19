@@ -1433,13 +1433,21 @@ func runConfigInit(args []string) error {
 		inst.Runtime.GoGCPercent = gogc
 	}
 
-	// Load existing config (if any).
+	// Load existing config (if any). A missing file is a fresh install; any
+	// other read/parse error must abort: silently starting from an empty root
+	// would rewrite the file without its other instances/bindings.
 	root := &config.RootConfig{}
 	hasExisting := false
 	if configIn != "" {
-		if loaded, loadErr := loadWritableRootConfig(configIn); loadErr == nil {
+		loaded, loadErr := loadWritableRootConfig(configIn)
+		switch {
+		case loadErr == nil:
 			root = loaded
 			hasExisting = len(root.Instances) > 0 || root.Config.Panel.URL != "" || root.Config.Kernel.Type != ""
+		case errors.Is(loadErr, os.ErrNotExist):
+			// Fresh file: nothing to preserve.
+		default:
+			return fmt.Errorf("refusing to overwrite unparsable config %s: %w", configIn, loadErr)
 		}
 	}
 

@@ -100,6 +100,10 @@ type LimitDispatcher struct {
 // ipCounter tracks IPs for unlimited users without any lock.
 type ipCounter struct {
 	ips sync.Map // sourceIP → *atomic.Int64 (refcount)
+	// live counts connections currently holding this counter. The entry is
+	// removed when it drops to zero; without it the map grew with every user
+	// that ever connected and GetConnectionState scanned them all each tick.
+	live atomic.Int64
 }
 
 // aliveIPs returns a snapshot of distinct IPs.
@@ -222,6 +226,15 @@ func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits m
 	d.deviceLimits = deviceLimits
 	d.mu.Unlock()
 
+	// Counters normally disappear on their last release; sweep ones whose
+	// last connection raced with that delete so a long-lived node cannot
+	// accumulate one entry per user that ever connected.
+	d.unlimitedIPs.Range(func(key, value interface{}) bool {
+		if ic, ok := value.(*ipCounter); ok && ic.live.Load() == 0 {
+			d.unlimitedIPs.CompareAndDelete(key, value)
+		}
+		return true
+	})
 }
 
 func (d *LimitDispatcher) ResetConns() {
@@ -302,13 +315,23 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 
 	// Fast path: no device limit — use lock-free sync.Map.
 	if !hasLimit || limit <= 0 {
-		v, _ := d.unlimitedIPs.LoadOrStore(email, &ipCounter{})
-		ic := v.(*ipCounter)
+		for {
+			v, _ := d.unlimitedIPs.LoadOrStore(email, &ipCounter{})
+			ic := v.(*ipCounter)
+			ic.live.Add(1)
+			// A concurrent release may have removed the entry between
+			// LoadOrStore and the increment; only count against the counter
+			// the map still owns, otherwise retry with a fresh one.
+			if cur, ok := d.unlimitedIPs.Load(email); !ok || cur != v {
+				ic.live.Add(-1)
+				continue
+			}
 
-		// Increment IP refcount atomically.
-		rv, _ := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
-		rv.(*atomic.Int64).Add(1)
-		return false
+			// Increment IP refcount atomically.
+			rv, _ := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
+			rv.(*atomic.Int64).Add(1)
+			return false
+		}
 	}
 
 	// Snapshot the global device state BEFORE taking d.mu (lock order:
@@ -472,7 +495,10 @@ func (d *LimitDispatcher) decLimited(email, sourceIP string) bool {
 }
 
 // decUnlimited decrements the unlimited-user refcount, reporting whether the
-// entry existed.
+// entry existed. The email entry is dropped once its last connection closes.
+// When a user's device limit changed while connections were open, the caller
+// may route a connection here that was admitted through the limited store; the
+// IP lookup then misses and the caller falls back to decLimited.
 func (d *LimitDispatcher) decUnlimited(email, sourceIP string) bool {
 	v, ok := d.unlimitedIPs.Load(email)
 	if !ok {
@@ -486,6 +512,9 @@ func (d *LimitDispatcher) decUnlimited(email, sourceIP string) bool {
 	counter := rv.(*atomic.Int64)
 	if counter.Add(-1) <= 0 {
 		ic.ips.Delete(sourceIP)
+	}
+	if ic.live.Add(-1) <= 0 {
+		d.unlimitedIPs.CompareAndDelete(email, ic)
 	}
 	return true
 }
