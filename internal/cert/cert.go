@@ -582,24 +582,7 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 	magic = certmagic.New(cache, certmagic.Config{
 		Storage: storage,
 		OnEvent: func(evtCtx context.Context, event string, data map[string]any) error {
-			// Only react to renewals; initial load happens explicitly after ObtainCertSync.
-			if event != "cert_obtained" {
-				return nil
-			}
-			if renewed, _ := data["renewal"].(bool); !renewed {
-				return nil
-			}
-			issuerKey, _ := data["issuer"].(string)
-			if issuerKey == "" {
-				return nil
-			}
-			if err := m.loadPEMFromStorageAt(evtCtx, storage, issuerKey, domain, certDir); err != nil {
-				nlog.Core().Error("failed to reload cert after renewal", "error", err)
-				return nil
-			}
-			m.renewed.Store(true)
-			nlog.Core().Info("TLS certificate reloaded after renewal", "domain", domain)
-			return nil
+			return m.handleCertEvent(evtCtx, event, data, storage, domain, certDir)
 		},
 	})
 
@@ -661,6 +644,30 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 	m.cache = cache
 	cacheOwned = true
 	m.acmeMu.Unlock()
+	return nil
+}
+
+// handleCertEvent reacts to certmagic lifecycle events: on a renewal it reloads
+// the PEM from storage and sets the flag the service loop consumes to reload
+// the kernel with the new certificate.
+func (m *Manager) handleCertEvent(ctx context.Context, event string, data map[string]any, storage certmagic.Storage, domain, certDir string) error {
+	// Only react to renewals; initial load happens explicitly after ObtainCertSync.
+	if event != "cert_obtained" {
+		return nil
+	}
+	if renewed, _ := data["renewal"].(bool); !renewed {
+		return nil
+	}
+	issuerKey, _ := data["issuer"].(string)
+	if issuerKey == "" {
+		return nil
+	}
+	if err := m.loadPEMFromStorageAt(ctx, storage, issuerKey, domain, certDir); err != nil {
+		nlog.Core().Error("failed to reload cert after renewal", "error", err)
+		return nil
+	}
+	m.renewed.Store(true)
+	nlog.Core().Info("TLS certificate reloaded after renewal", "domain", domain)
 	return nil
 }
 

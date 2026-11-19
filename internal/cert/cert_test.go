@@ -462,3 +462,51 @@ func TestPersistPEMTightensExistingKeyPermissions(t *testing.T) {
 		t.Fatalf("key mode = %o, want 600", got)
 	}
 }
+
+// certmagic renewal events must reload the material and set the flag the
+// service loop consumes to reload the kernel.
+func TestHandleCertEventMarksRenewed(t *testing.T) {
+	dir := t.TempDir()
+	storage := &certmagic.FileStorage{Path: dir}
+	const domain = "renew.test"
+	const issuerKey = "test-issuer"
+	ctx := context.Background()
+
+	certV2, keyV2 := generateSelfSignedPair(t, domain)
+	if err := storage.Store(ctx, certmagic.StorageKeys.SiteCert(issuerKey, domain), certV2); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Store(ctx, certmagic.StorageKeys.SitePrivateKey(issuerKey, domain), keyV2); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(config.CertConfig{Domain: domain, CertDir: dir})
+	if m.CertRenewed() {
+		t.Fatal("fresh manager must not report a renewal")
+	}
+
+	err := m.handleCertEvent(ctx, "cert_obtained", map[string]any{
+		"renewal": true,
+		"issuer":  issuerKey,
+	}, storage, domain, dir)
+	if err != nil {
+		t.Fatalf("handleCertEvent: %v", err)
+	}
+	if !m.CertRenewed() {
+		t.Fatal("renewal event must set the renewed flag")
+	}
+	if m.CertRenewed() {
+		t.Fatal("renewed flag must be consumed once")
+	}
+	if got := m.TLSCert(); string(got.CertPEM) != string(certV2) {
+		t.Fatal("renewal must reload the new certificate")
+	}
+
+	// Non-renewal events are ignored.
+	if err := m.handleCertEvent(ctx, "cert_obtained", map[string]any{"renewal": false}, storage, domain, dir); err != nil {
+		t.Fatal(err)
+	}
+	if m.CertRenewed() {
+		t.Fatal("initial issuance must not mark a renewal")
+	}
+}
