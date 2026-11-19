@@ -646,7 +646,8 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 	kcfg := config.KernelConfig{
 		LogLevel: "info",
 		CustomOutbound: []map[string]any{
-			{"tag": "block", "type": "dns"}, // Local static override
+			{"tag": "block", "type": "dns"},     // Local static override (trusted operator config)
+			{"tag": "Direct", "type": "direct"}, // Case-only: must not shadow the built-in
 		},
 	}
 	nc := &panel.NodeConfig{
@@ -654,7 +655,7 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 		ServerPort: 111,
 		Cipher:     "aes-128-gcm",
 		CustomOutbounds: []panel.OutboundConfig{
-			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4", "port": 1080}}, // Panel override
+			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4", "port": 1080}}, // reserved: dropped
 		},
 	}
 
@@ -664,33 +665,23 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 	}
 	outbounds := cfg["outbounds"].([]M)
 
-	// We have 2 overrides in input, so we should have exactly 2 outbounds total
-	// (no auto-generated defaults for these tags)
-	if len(outbounds) != 2 {
-		t.Errorf("outbounds: got %d, want 2", len(outbounds))
+	// built-in direct + local "Direct" + local block override
+	if len(outbounds) != 3 {
+		t.Fatalf("outbounds: got %d, want 3", len(outbounds))
 	}
 
-	foundDirect := false
-	foundBlock := false
-
+	types := make(map[string]string, len(outbounds))
 	for _, o := range outbounds {
-		tag := o["tag"].(string)
-		if tag == "direct" {
-			foundDirect = true
-			if o["type"] != "socks" {
-				t.Errorf("expected 'direct' outbound to be type 'socks' (panel priority), got %v", o["type"])
-			}
-		}
-		if tag == "block" {
-			foundBlock = true
-			if o["type"] != "dns" {
-				t.Errorf("expected 'block' outbound to be type 'dns' (static config priority), got %v", o["type"])
-			}
-		}
+		types[o["tag"].(string)] = o["type"].(string)
 	}
-
-	if !foundDirect || !foundBlock {
-		t.Errorf("missing outbounds: direct=%v, block=%v", foundDirect, foundBlock)
+	if types["direct"] != "direct" {
+		t.Errorf("built-in direct was shadowed: %v", types)
+	}
+	if types["block"] != "dns" {
+		t.Errorf("local block override not honored: %v", types)
+	}
+	if types["Direct"] != "direct" {
+		t.Errorf("case-only local tag lost: %v", types)
 	}
 }
 
@@ -879,29 +870,65 @@ func TestBuildRoutes_WithCustomRouteRules(t *testing.T) {
 		t.Fatalf("buildRoutes: %v", err)
 	}
 	allRules := route["rules"].([]M)
-	if len(allRules) != 9 {
-		t.Fatalf("rules count: got %d, want 9", len(allRules))
+	// One structured rule renders as one kernel rule; the two trailing rules
+	// are the built-in private-network blocks.
+	if len(allRules) != 3 {
+		t.Fatalf("rules count: got %d, want 3", len(allRules))
 	}
-	if allRules[0]["domain"].([]string)[0] != "full.example.com" {
-		t.Fatalf("unexpected exact domain rule: %v", allRules[0])
+	merged := allRules[0]
+	if got := merged["outbound"]; got != "direct" {
+		t.Fatalf("outbound: got %v, want direct", got)
 	}
-	if allRules[1]["domain_suffix"].([]string)[0] != "example.org" {
-		t.Fatalf("unexpected domain suffix rule: %v", allRules[1])
+	if got := merged["domain"].([]string); len(got) != 1 || got[0] != "full.example.com" {
+		t.Fatalf("unexpected exact domain: %v", got)
 	}
-	if allRules[2]["ip_cidr"].([]string)[0] != "1.1.1.0/24" {
-		t.Fatalf("unexpected ip cidr rule: %v", allRules[2])
+	if got := merged["domain_suffix"].([]string); len(got) != 1 || got[0] != "example.org" {
+		t.Fatalf("unexpected domain suffix: %v", got)
 	}
-	if allRules[3]["port"].([]int)[0] != 53 {
-		t.Fatalf("unexpected port rule: %v", allRules[3])
+	if got := merged["ip_cidr"].([]string); len(got) != 1 || got[0] != "1.1.1.0/24" {
+		t.Fatalf("unexpected ip cidr: %v", got)
 	}
-	if allRules[4]["network"].([]string)[0] != "tcp" {
-		t.Fatalf("unexpected network rule: %v", allRules[4])
+	if got := merged["port"].([]int); len(got) != 1 || got[0] != 53 {
+		t.Fatalf("unexpected port: %v", got)
 	}
-	if allRules[5]["source_ip_cidr"].([]string)[0] != "10.10.0.0/16" {
-		t.Fatalf("unexpected source cidr rule: %v", allRules[5])
+	if got := merged["port_range"].([]string); len(got) != 1 || got[0] != "1000:1002" {
+		t.Fatalf("unexpected port range: %v", got)
 	}
-	if allRules[6]["source_port_range"].([]string)[0] != "2000:2001" {
-		t.Fatalf("unexpected source port rule: %v", allRules[6])
+	if got := merged["network"].([]string); len(got) != 1 || got[0] != "tcp" {
+		t.Fatalf("unexpected network: %v", got)
+	}
+	if got := merged["source_ip_cidr"].([]string); len(got) != 1 || got[0] != "10.10.0.0/16" {
+		t.Fatalf("unexpected source cidr: %v", got)
+	}
+	if got := merged["source_port_range"].([]string); len(got) != 1 || got[0] != "2000:2001" {
+		t.Fatalf("unexpected source port range: %v", got)
+	}
+}
+
+// A structured raw entry uses the panel's snake_case keys; encoding/json folds
+// case but not underscores, so these keys must survive decode + compile.
+func TestBuildRoutes_RawStructuredSnakeCaseKeys(t *testing.T) {
+	raw := []map[string]any{{
+		"match":  map[string]any{"domain_suffixes": []any{"ads.example.com"}, "ports": []any{"443"}},
+		"action": map[string]any{"type": "block"},
+	}}
+	route, err := buildRoutes(nil, nil, raw, nil)
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
+	allRules := route["rules"].([]M)
+	if len(allRules) != 3 {
+		t.Fatalf("rules count: got %d, want 3", len(allRules))
+	}
+	merged := allRules[0]
+	if got := merged["domain_suffix"].([]string); len(got) != 1 || got[0] != "ads.example.com" {
+		t.Fatalf("snake_case domain_suffixes dropped: %v", merged)
+	}
+	if got := merged["port"].([]int); len(got) != 1 || got[0] != 443 {
+		t.Fatalf("snake_case ports dropped: %v", merged)
+	}
+	if got := merged["outbound"]; got != "block" {
+		t.Fatalf("outbound: got %v, want block", got)
 	}
 }
 

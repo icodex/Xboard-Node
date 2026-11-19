@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -23,6 +24,42 @@ func sanitizedRouteCount(t *testing.T, routes []map[string]any, kernel string) i
 		t.Fatalf("raw routes must never fail the node (kernel %s): %v", kernel, err)
 	}
 	return len(spec.CustomRoutes)
+}
+
+// A structured entry uses the panel's snake_case keys. encoding/json folds
+// case but not underscores, so without tags these keys decode to nothing and
+// the rule is dropped as "match is required".
+func TestSanitizeRawCustomRoutes_StructuredSnakeCaseSurvives(t *testing.T) {
+	routes := []map[string]any{{
+		"match": map[string]any{
+			"domain_suffixes": []any{"example.com"},
+			"ip_cidrs":        []any{"10.0.0.0/8"},
+			"source_ports":    []any{"1000-2000"},
+		},
+		"action": map[string]any{"type": "direct"},
+	}}
+	for _, kernel := range []string{"singbox", "xray"} {
+		if got := sanitizedRouteCount(t, routes, kernel); got != 1 {
+			t.Fatalf("kernel %s: snake_case structured payload must survive, kept %d", kernel, got)
+		}
+	}
+}
+
+func TestCustomRouteRuleJSONTags(t *testing.T) {
+	var rule CustomRouteRule
+	payload := `{"name":"n","match":{"domain_suffixes":["example.com"],"ip_cidrs":["10.0.0.0/8"],"source_ports":["1-2"]},"action":{"type":"route","target":"proxy"}}`
+	if err := json.Unmarshal([]byte(payload), &rule); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rule.Name != "n" || rule.Match.DomainSuffixes == nil || rule.Match.IPCIDRs == nil || rule.Match.SourcePorts == nil {
+		t.Fatalf("snake_case keys not decoded: %+v", rule)
+	}
+	if rule.Match.DomainSuffixes[0] != "example.com" || rule.Match.IPCIDRs[0] != "10.0.0.0/8" {
+		t.Fatalf("unexpected values: %+v", rule.Match)
+	}
+	if rule.Action.Type != "route" || rule.Action.Target != "proxy" {
+		t.Fatalf("unexpected action: %+v", rule.Action)
+	}
 }
 
 // The user's production payload — a structured match/action entry pasted into

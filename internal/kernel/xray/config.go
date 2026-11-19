@@ -27,20 +27,29 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	// Panel-defined custom outbounds are authored in Xray-native form and kept
 	// native here (flat shorthand is assembled into vnext/servers/peers).
 	for _, co := range nc.CustomOutbounds {
+		if model.IsReservedOutboundTag(co.Tag) {
+			// Validation rejects this earlier; drop it here too so a direct
+			// build can never shadow an outbound the private-network rules and
+			// the direct final route depend on.
+			nlog.Core().Warn("panel custom outbound uses a reserved tag, dropping", "tag", co.Tag)
+			continue
+		}
 		converted, err := outboundConfigToXray(co)
 		if err != nil {
 			return nil, fmt.Errorf("custom outbound %q: %w", co.Tag, err)
 		}
 		outbounds = append(outbounds, converted)
-		tags[strings.ToLower(co.Tag)] = true
+		tags[co.Tag] = true
 		kernel.LogRenderedOutbound(co)
 	}
 
-	// Static outbounds from local config file
+	// Static outbounds from local config file. Exact-case tags only: both
+	// kernels resolve references case-sensitively, and folding case here would
+	// let "Direct" suppress the built-in "direct".
 	for _, co := range kcfg.CustomOutbound {
 		tag, _ := co["tag"].(string)
 		if tag != "" {
-			tags[strings.ToLower(tag)] = true
+			tags[tag] = true
 		}
 		outbounds = append(outbounds, M(co))
 	}
@@ -882,73 +891,84 @@ func compilePanelRouteRule(rule model.RouteRule) []M {
 		action.Type = "route"
 		action.Target = rule.ActionValue
 	}
-	return compileCustomRouteRule(model.CustomRouteRule{Match: match, Action: action})
-}
-
-func compileCustomRouteRule(rule model.CustomRouteRule) []M {
-	outbound := xrayOutboundForAction(rule.Action)
+	outbound := xrayOutboundForAction(action)
+	// The panel match list is a flat any-of set: domains and CIDRs must stay
+	// ORed, so each condition class becomes its own rule. Merging them into one
+	// field rule would AND a domain with a CIDR.
 	var compiled []M
-
-	if len(rule.Match.Domains) > 0 || len(rule.Match.DomainSuffixes) > 0 {
-		domains := make([]string, 0, len(rule.Match.Domains)+len(rule.Match.DomainSuffixes))
-		for _, value := range rule.Match.Domains {
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			domains = append(domains, value)
-		}
-		for _, value := range rule.Match.DomainSuffixes {
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			domains = append(domains, xrayDomainSuffix(value))
-		}
-		if len(domains) > 0 {
-			compiled = append(compiled, M{
-				"type":        "field",
-				"domain":      domains,
-				"outboundTag": outbound,
-			})
-		}
+	if r, ok := compileRouteMatch(model.RouteMatch{Domains: match.Domains, DomainSuffixes: match.DomainSuffixes}, outbound); ok {
+		compiled = append(compiled, r)
 	}
-	if len(rule.Match.IPCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"ip":          copyStrings(rule.Match.IPCIDRs),
-			"outboundTag": outbound,
-		})
-	}
-	if len(rule.Match.Ports) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"port":        strings.Join(rule.Match.Ports, ","),
-			"outboundTag": outbound,
-		})
-	}
-	if len(rule.Match.Networks) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"network":     strings.Join(rule.Match.Networks, ","),
-			"outboundTag": outbound,
-		})
-	}
-	if len(rule.Match.SourceCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"source":      copyStrings(rule.Match.SourceCIDRs),
-			"outboundTag": outbound,
-		})
-	}
-	if len(rule.Match.SourcePorts) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"sourcePort":  strings.Join(rule.Match.SourcePorts, ","),
-			"outboundTag": outbound,
-		})
+	if r, ok := compileRouteMatch(model.RouteMatch{IPCIDRs: match.IPCIDRs}, outbound); ok {
+		compiled = append(compiled, r)
 	}
 	return compiled
+}
+
+// compileCustomRouteRule renders one structured match/action rule as a single
+// xray field rule. Arrays inside a key OR and keys AND, so ip + port only
+// match traffic that satisfies both; emitting one rule per key (the previous
+// behavior) turned every multi-key match into an OR.
+func compileCustomRouteRule(rule model.CustomRouteRule) []M {
+	compiled, ok := compileRouteMatch(rule.Match, xrayOutboundForAction(rule.Action))
+	if !ok {
+		return nil
+	}
+	return []M{compiled}
+}
+
+func compileRouteMatch(match model.RouteMatch, outbound string) (M, bool) {
+	entry := M{"type": "field", "outboundTag": outbound}
+	matched := false
+
+	if domains := xrayRouteDomains(match); len(domains) > 0 {
+		entry["domain"] = domains
+		matched = true
+	}
+	if len(match.IPCIDRs) > 0 {
+		entry["ip"] = copyStrings(match.IPCIDRs)
+		matched = true
+	}
+	if len(match.Ports) > 0 {
+		entry["port"] = strings.Join(match.Ports, ",")
+		matched = true
+	}
+	if len(match.Networks) > 0 {
+		entry["network"] = strings.Join(match.Networks, ",")
+		matched = true
+	}
+	if len(match.SourceCIDRs) > 0 {
+		entry["source"] = copyStrings(match.SourceCIDRs)
+		matched = true
+	}
+	if len(match.SourcePorts) > 0 {
+		entry["sourcePort"] = strings.Join(match.SourcePorts, ",")
+		matched = true
+	}
+
+	if !matched {
+		return nil, false
+	}
+	return entry, true
+}
+
+func xrayRouteDomains(match model.RouteMatch) []string {
+	domains := make([]string, 0, len(match.Domains)+len(match.DomainSuffixes))
+	for _, value := range match.Domains {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		domains = append(domains, value)
+	}
+	for _, value := range match.DomainSuffixes {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		domains = append(domains, xrayDomainSuffix(value))
+	}
+	return domains
 }
 
 // xrayDomainSuffix renders a structured suffix value for xray's domain

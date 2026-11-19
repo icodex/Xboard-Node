@@ -58,6 +58,18 @@ func TestValidateCustomOutbounds(t *testing.T) {
 			outbounds: []OutboundConfig{{Tag: "proxy", Protocol: "socks", ProxyTag: "direct", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080}}},
 		},
 		{
+			// Shadowing "block" turns the built-in private-network rules into a
+			// proxy hop; shadowing "direct" makes the final route dangle.
+			name:      "reserved builtin tag",
+			outbounds: []OutboundConfig{{Tag: "block", Protocol: "socks", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080}}},
+			wantErr:   `custom_outbounds[0].tag "block" is reserved for the built-in block outbound`,
+		},
+		{
+			name:      "case-insensitive reserved tag",
+			outbounds: []OutboundConfig{{Tag: "Direct", Protocol: "socks", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080}}},
+			wantErr:   `custom_outbounds[0].tag "Direct" is reserved for the built-in direct outbound`,
+		},
+		{
 			name:      "unsupported protocol for kernel",
 			outbounds: []OutboundConfig{{Tag: "hy2", Protocol: "hysteria2", Settings: map[string]any{"server": "2.2.2.2", "server_port": 8443}}},
 			kernel:    "xray",

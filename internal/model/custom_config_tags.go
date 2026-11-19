@@ -119,6 +119,20 @@ func toMap(v any) (map[string]any, bool) {
 	}
 }
 
+// IsReservedOutboundTag reports whether tag names one of the built-in
+// outbounds every kernel config references: the private-network block rules
+// and the direct final route. A panel-provided outbound must not take these
+// names — shadowing "block" silently turns SSRF protection into a proxy hop,
+// and a case-only shadow ("Direct") removes the built-in and leaves "direct"
+// dangling, which makes the kernel reject the whole config.
+func IsReservedOutboundTag(tag string) bool {
+	switch strings.ToLower(strings.TrimSpace(tag)) {
+	case "direct", "block":
+		return true
+	}
+	return false
+}
+
 func validateOutboundTagCollisions(structured []OutboundConfig, additional []outboundTagSource) error {
 	seen := make(map[string]string, len(additional))
 	for _, source := range additional {

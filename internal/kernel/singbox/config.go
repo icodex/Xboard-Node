@@ -27,20 +27,30 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	// Panel-defined custom outbounds are authored in Xray-native form and
 	// translated to the sing-box flat layout here.
 	for _, co := range nc.CustomOutbounds {
+		if model.IsReservedOutboundTag(co.Tag) {
+			// Validation rejects this earlier; drop it here too so a direct
+			// build (standalone/tests) can never shadow an outbound the
+			// private-network rules and the final route depend on.
+			nlog.Core().Warn("panel custom outbound uses a reserved tag, dropping", "tag", co.Tag)
+			continue
+		}
 		converted, err := outboundConfigToSingbox(co)
 		if err != nil {
 			return nil, fmt.Errorf("custom outbound %q: %w", co.Tag, err)
 		}
 		outbounds = append(outbounds, converted)
-		tags[strings.ToLower(co.Tag)] = true
+		tags[co.Tag] = true
 		kernel.LogRenderedOutbound(co)
 	}
 
-	// Static outbounds from local config file
+	// Static outbounds from local config file. Tags are matched exactly:
+	// the kernel resolves references case-sensitively, so folding case here
+	// would let "Direct" suppress the built-in "direct" while "final" still
+	// points at "direct".
 	for _, co := range kcfg.CustomOutbound {
 		tag, _ := co["tag"].(string)
 		if tag != "" {
-			tags[strings.ToLower(tag)] = true
+			tags[tag] = true
 		}
 		outbounds = append(outbounds, M(co))
 	}
@@ -238,67 +248,64 @@ func compilePanelRouteRule(pr model.RouteRule) []M {
 	return compiled
 }
 
+// compileCustomRouteRule renders one structured match/action rule as a single
+// kernel rule. sing-box ORs values inside a matcher key and ANDs the keys, so
+// a rule with both ip_cidr and port only matches traffic that satisfies both.
+// Emitting one rule per key (the previous behavior) turned every multi-key
+// match into an OR: {"ports":["443"],"domains":["ads.example.com"]} blocked
+// all HTTPS traffic.
 func compileCustomRouteRule(rule model.CustomRouteRule) []M {
 	if rule.Disabled {
 		return nil
 	}
+	compiled, ok := compileRouteMatch(rule.Match, singboxOutboundForAction(rule.Action))
+	if !ok {
+		return nil
+	}
+	return []M{compiled}
+}
 
-	outbound := singboxOutboundForAction(rule.Action)
-	var compiled []M
+func compileRouteMatch(match model.RouteMatch, outbound string) (M, bool) {
+	entry := M{"outbound": outbound}
 
-	if len(rule.Match.Domains) > 0 {
-		compiled = append(compiled, M{
-			"domain":   copyStrings(rule.Match.Domains),
-			"outbound": outbound,
-		})
+	if len(match.Domains) > 0 {
+		entry["domain"] = copyStrings(match.Domains)
 	}
-	if len(rule.Match.DomainSuffixes) > 0 {
-		compiled = append(compiled, M{
-			"domain_suffix": copyStrings(rule.Match.DomainSuffixes),
-			"outbound":      outbound,
-		})
+	if len(match.DomainSuffixes) > 0 {
+		entry["domain_suffix"] = copyStrings(match.DomainSuffixes)
 	}
-	if len(rule.Match.IPCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"ip_cidr":  copyStrings(rule.Match.IPCIDRs),
-			"outbound": outbound,
-		})
+	if len(match.IPCIDRs) > 0 {
+		entry["ip_cidr"] = copyStrings(match.IPCIDRs)
 	}
-	if len(rule.Match.Ports) > 0 {
-		ports, portRanges := splitPorts(rule.Match.Ports)
-		entry := M{"outbound": outbound}
+	if len(match.Ports) > 0 {
+		ports, portRanges := splitPorts(match.Ports)
 		if len(ports) > 0 {
 			entry["port"] = ports
 		}
 		if len(portRanges) > 0 {
 			entry["port_range"] = portRanges
 		}
-		compiled = append(compiled, entry)
 	}
-	if len(rule.Match.Networks) > 0 {
-		compiled = append(compiled, M{
-			"network":  copyStrings(rule.Match.Networks),
-			"outbound": outbound,
-		})
+	if len(match.Networks) > 0 {
+		entry["network"] = copyStrings(match.Networks)
 	}
-	if len(rule.Match.SourceCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"source_ip_cidr": copyStrings(rule.Match.SourceCIDRs),
-			"outbound":       outbound,
-		})
+	if len(match.SourceCIDRs) > 0 {
+		entry["source_ip_cidr"] = copyStrings(match.SourceCIDRs)
 	}
-	if len(rule.Match.SourcePorts) > 0 {
-		ports, portRanges := splitPorts(rule.Match.SourcePorts)
-		entry := M{"outbound": outbound}
+	if len(match.SourcePorts) > 0 {
+		ports, portRanges := splitPorts(match.SourcePorts)
 		if len(ports) > 0 {
 			entry["source_port"] = ports
 		}
 		if len(portRanges) > 0 {
 			entry["source_port_range"] = portRanges
 		}
-		compiled = append(compiled, entry)
 	}
-	return compiled
+
+	if len(entry) == 1 {
+		return nil, false
+	}
+	return entry, true
 }
 
 func singboxOutboundForAction(action model.RouteAction) string {

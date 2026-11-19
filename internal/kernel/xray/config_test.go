@@ -109,7 +109,8 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 	kcfg := config.KernelConfig{
 		LogLevel: "info",
 		CustomOutbound: []map[string]any{
-			{"tag": "block", "protocol": "dns"}, // Local static override
+			{"tag": "block", "protocol": "dns"},      // Local static override (trusted operator config)
+			{"tag": "Direct", "protocol": "freedom"}, // Case-only: must not shadow the built-in
 		},
 	}
 	nc := &panel.NodeConfig{
@@ -117,7 +118,7 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 		ServerPort: 111,
 		Cipher:     "aes-128-gcm",
 		CustomOutbounds: []panel.OutboundConfig{
-			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4", "port": 1080}}, // Panel override
+			{Tag: "direct", Protocol: "socks", Settings: map[string]any{"address": "1.2.3.4", "port": 1080}}, // reserved: dropped
 		},
 	}
 
@@ -127,33 +128,23 @@ func TestBuildConfig_OutboundPriority(t *testing.T) {
 	}
 	outbounds := cfg["outbounds"].([]M)
 
-	// Since we overrode both 'direct' and 'block', the result should contain
-	// exactly these two custom outbounds, without auto-generated defaults.
-	if len(outbounds) != 2 {
-		t.Errorf("outbounds: got %d, want 2", len(outbounds))
+	// built-in direct + local "Direct" + local block override
+	if len(outbounds) != 3 {
+		t.Fatalf("outbounds: got %d, want 3", len(outbounds))
 	}
 
-	foundDirect := false
-	foundBlock := false
-
+	protocols := make(map[string]string, len(outbounds))
 	for _, o := range outbounds {
-		tag := o["tag"].(string)
-		if tag == "direct" {
-			foundDirect = true
-			if o["protocol"] != "socks" {
-				t.Errorf("expected 'direct' protocol to be 'socks' (panel priority), got %v", o["protocol"])
-			}
-		}
-		if tag == "block" {
-			foundBlock = true
-			if o["protocol"] != "dns" {
-				t.Errorf("expected 'block' protocol to be 'dns' (static config priority), got %v", o["protocol"])
-			}
-		}
+		protocols[o["tag"].(string)] = o["protocol"].(string)
 	}
-
-	if !foundDirect || !foundBlock {
-		t.Errorf("missing outbounds: direct=%v, block=%v", foundDirect, foundBlock)
+	if protocols["direct"] != "freedom" {
+		t.Errorf("built-in direct was shadowed: %v", protocols)
+	}
+	if protocols["block"] != "dns" {
+		t.Errorf("local block override not honored: %v", protocols)
+	}
+	if protocols["Direct"] != "freedom" {
+		t.Errorf("case-only local tag lost: %v", protocols)
 	}
 }
 
@@ -427,26 +418,53 @@ func TestBuildRouting_WithCustomRouteRules(t *testing.T) {
 
 	routing := buildRouting(nil, customRules, nil)
 	xrayRules := routing["rules"].([]M)
-	if len(xrayRules) != 6 {
-		t.Fatalf("expected 6 rules, got %d", len(xrayRules))
+	// One structured rule renders as one field rule; the trailing rule is the
+	// built-in private-network block.
+	if len(xrayRules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(xrayRules))
 	}
-	if xrayRules[0]["outboundTag"] != "warp-jp" {
-		t.Fatalf("expected first custom outbound warp-jp, got %v", xrayRules[0]["outboundTag"])
+	merged := xrayRules[0]
+	if merged["outboundTag"] != "warp-jp" {
+		t.Fatalf("expected first custom outbound warp-jp, got %v", merged["outboundTag"])
 	}
-	if got := xrayRules[0]["domain"].([]string); len(got) != 2 || got[0] != "full.example.com" || got[1] != "domain:example.org" {
+	if got := merged["domain"].([]string); len(got) != 2 || got[0] != "full.example.com" || got[1] != "domain:example.org" {
 		t.Fatalf("unexpected custom domains: %v", got)
 	}
-	if got := xrayRules[1]["port"]; got != "80,443-445" {
+	if got := merged["port"]; got != "80,443-445" {
 		t.Fatalf("unexpected port matcher: %v", got)
 	}
-	if got := xrayRules[2]["network"]; got != "tcp,udp" {
+	if got := merged["network"]; got != "tcp,udp" {
 		t.Fatalf("unexpected network matcher: %v", got)
 	}
-	if got := xrayRules[3]["source"].([]string); len(got) != 1 || got[0] != "192.168.1.0/24" {
+	if got := merged["source"].([]string); len(got) != 1 || got[0] != "192.168.1.0/24" {
 		t.Fatalf("unexpected source cidr matcher: %v", got)
 	}
-	if got := xrayRules[4]["sourcePort"]; got != "1000-1002" {
+	if got := merged["sourcePort"]; got != "1000-1002" {
 		t.Fatalf("unexpected source port matcher: %v", got)
+	}
+}
+
+// A structured raw entry uses the panel's snake_case keys; encoding/json folds
+// case but not underscores, so decode + compile must keep them.
+func TestBuildRouting_RawStructuredSnakeCaseKeys(t *testing.T) {
+	raw := []map[string]any{{
+		"match":  map[string]any{"domain_suffixes": []any{"ads.example.com"}, "ports": []any{"443"}},
+		"action": map[string]any{"type": "block"},
+	}}
+	routing := buildRouting(nil, nil, raw)
+	xrayRules := routing["rules"].([]M)
+	if len(xrayRules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(xrayRules))
+	}
+	merged := xrayRules[0]
+	if got := merged["domain"].([]string); len(got) != 1 || got[0] != "domain:ads.example.com" {
+		t.Fatalf("snake_case domain_suffixes dropped: %v", merged)
+	}
+	if got := merged["port"]; got != "443" {
+		t.Fatalf("snake_case ports dropped: %v", merged)
+	}
+	if merged["outboundTag"] != "block" {
+		t.Fatalf("outboundTag: got %v, want block", merged["outboundTag"])
 	}
 }
 
@@ -1032,8 +1050,8 @@ func TestCompileCustomRouteRule_PreservesSuffixPrefixes(t *testing.T) {
 	}
 
 	compiled := compileCustomRouteRule(rule)
-	if len(compiled) == 0 {
-		t.Fatal("expected a compiled rule")
+	if len(compiled) != 1 {
+		t.Fatalf("one structured rule must render as one kernel rule, got %d", len(compiled))
 	}
 	domains, ok := compiled[0]["domain"].([]string)
 	if !ok {

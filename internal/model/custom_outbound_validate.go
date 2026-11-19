@@ -52,6 +52,9 @@ func ValidateCustomOutboundsForKernel(outbounds []OutboundConfig, kernelType str
 		if tag == "" {
 			return fmt.Errorf("custom_outbounds[%d].tag is required", i)
 		}
+		if IsReservedOutboundTag(tag) {
+			return fmt.Errorf("custom_outbounds[%d].tag %q is reserved for the built-in %s outbound", i, outbound.Tag, strings.ToLower(tag))
+		}
 		if protocol == "" {
 			return fmt.Errorf("custom_outbounds[%d].protocol is required", i)
 		}
