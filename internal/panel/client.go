@@ -445,6 +445,13 @@ func (c *Client) doRequest(method, path string, body []byte, ifNoneMatch string)
 
 // drainAndClose reads any remaining bytes (up to 512B) and closes the body.
 // This allows the HTTP transport to reuse the underlying TCP connection.
+// ResetETags clears the cached ETags, forcing the next poll to fetch a full
+// snapshot. Retained for callers that force a resync.
+func (c *Client) ResetETags() {
+	c.configETag = ""
+	c.userETag = ""
+}
+
 func drainAndClose(body io.ReadCloser) {
 	io.CopyN(io.Discard, body, 512)
 	body.Close()

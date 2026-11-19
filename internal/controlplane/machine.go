@@ -147,3 +147,6 @@ func (p *MachinePanelControlPlane) Metrics() APIMetrics {
 	api := p.client.SnapshotMetrics()
 	return APIMetrics{Success: api.Success, Failure: api.Failure}
 }
+
+// SupportsDeviceReports reports whether device snapshots can be pushed.
+func (p *MachinePanelControlPlane) SupportsDeviceReports() bool { return p != nil && p.push != nil }

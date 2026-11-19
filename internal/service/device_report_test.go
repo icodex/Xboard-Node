@@ -129,7 +129,8 @@ func (s *blockingSink) Report(controlplane.ReportPayload) error {
 func (s *blockingSink) ReportDevices(controlplane.PushClient, map[int][]string) bool {
 	return false
 }
-func (s *blockingSink) SupportsReporting() bool { return true }
+func (s *blockingSink) SupportsReporting() bool     { return true }
+func (s *blockingSink) SupportsDeviceReports() bool { return true }
 
 // Async reports must be counted and joined: a failed one restores traffic into
 // the tracker that the final snapshot then flushes.

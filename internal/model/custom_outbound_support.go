@@ -12,6 +12,12 @@ func OutboundSupportMatrix() map[string]KernelOutboundSupport {
 				"http",
 				"wireguard",
 			},
+			Features: []string{
+				"tag",
+				"protocol",
+				"settings",
+				"proxy_tag",
+			},
 		},
 		"singbox": {
 			Protocols: []string{
@@ -28,10 +34,17 @@ func OutboundSupportMatrix() map[string]KernelOutboundSupport {
 				"naive",
 				"mieru",
 			},
+			Features: []string{
+				"tag",
+				"protocol",
+				"settings",
+				"proxy_tag",
+			},
 		},
 	}
 }
 
 type KernelOutboundSupport struct {
 	Protocols []string
+	Features  []string
 }

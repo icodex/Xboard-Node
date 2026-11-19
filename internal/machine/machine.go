@@ -592,3 +592,24 @@ func (p *machineNodePush) SendDeviceReport(devices map[int][]string) bool {
 	data, _ := json.Marshal(payload)
 	return s.SendRaw(panel.WSEventReportDevices, data)
 }
+
+// stopNode cancels one node and waits for its goroutine. Retained for callers
+// that stop a single node synchronously (rediscovery uses detachNode instead).
+func (o *Orchestrator) stopNode(nodeID int) {
+	o.mu.Lock()
+	h, ok := o.nodes[nodeID]
+	if !ok {
+		o.mu.Unlock()
+		return
+	}
+	delete(o.nodes, nodeID)
+	o.mu.Unlock()
+
+	o.eventsMu.Lock()
+	delete(o.mailboxes, nodeID)
+	o.eventsMu.Unlock()
+
+	nlog.Core().Info(fmt.Sprintf("machine: stopping node %d", nodeID))
+	h.cancel()
+	<-h.done
+}

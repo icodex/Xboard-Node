@@ -918,3 +918,32 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 // so that concurrent Xray instances in multi-node mode each capture their
 // own LimitDispatcher.
 var xrayCreationMu sync.Mutex
+
+// closeOld drains an old xray instance in the background, then hard-closes it.
+// Retained for branches that still recycle instances this way.
+func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
+	if inst == nil {
+		return
+	}
+	go func() {
+		// Drain connections gracefully (best effort), then hard close.
+		if ld != nil {
+			drainConns(ld, 5*time.Minute)
+		}
+		inst.Close()
+		if ld != nil {
+			ld.ResetConns()
+		}
+		nlog.Core().Debug("xray: old instance recycled")
+	}()
+}
+
+func drainConns(ld *LimitDispatcher, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ld.connCount.Load() == 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

@@ -220,3 +220,6 @@ func (p *panelPushClient) IsConnected() bool       { return p.inner.IsConnected(
 func (p *panelPushClient) SendDeviceReport(devices map[int][]string) bool {
 	return p.inner.SendDeviceReport(devices)
 }
+
+// SupportsDeviceReports reports whether device snapshots can be pushed.
+func (p *PanelControlPlane) SupportsDeviceReports() bool { return true }

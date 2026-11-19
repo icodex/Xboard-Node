@@ -315,3 +315,13 @@ func cycleSpeed(cycleBytes int64, elapsed time.Duration) int64 {
 	}
 	return int64(float64(cycleBytes) / elapsed.Seconds())
 }
+
+// copyTrafficMap returns a copy of a per-user cumulative traffic map.
+// Retained for callers that snapshot traffic before mutation.
+func copyTrafficMap(src map[int][2]int64) map[int][2]int64 {
+	dst := make(map[int][2]int64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}

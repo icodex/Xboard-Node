@@ -652,6 +652,23 @@ func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string)
 	return w.trySend(msg, "device report")
 }
 
+// SendNodeStatus sends a node.status event with the given node_id (machine mode).
+func (w *WSClient) SendNodeStatus(nodeID int, stats map[string]interface{}) {
+	if !w.connected.Load() || stats == nil {
+		return
+	}
+	if nodeID > 0 {
+		stats["node_id"] = nodeID
+	}
+	data, _ := json.Marshal(stats)
+	msg := wsMessage{
+		Event:     "node.status",
+		Data:      data,
+		Timestamp: time.Now().Unix(),
+	}
+	w.trySend(msg, "node status")
+}
+
 // SendRaw sends a raw message to the panel via WebSocket.
 func (w *WSClient) SendRaw(event string, data json.RawMessage) bool {
 	if !w.connected.Load() {

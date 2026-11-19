@@ -272,3 +272,25 @@ func TestClientErrorBodyNotEchoed(t *testing.T) {
 		t.Fatalf("error should report the body size: %v", err)
 	}
 }
+
+func TestResetETags(t *testing.T) {
+	callCount := 0
+	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount <= 2 {
+			w.Header().Set("ETag", `"e1"`)
+			json.NewEncoder(w).Encode(NodeConfig{Protocol: "ss"})
+			return
+		}
+		// After reset, should NOT send If-None-Match
+		if r.Header.Get("If-None-Match") != "" {
+			t.Errorf("expected no If-None-Match after reset, got %q", r.Header.Get("If-None-Match"))
+		}
+		json.NewEncoder(w).Encode(NodeConfig{Protocol: "ss"})
+	})
+	defer ts.Close()
+
+	client.GetConfig()
+	client.ResetETags()
+	client.GetConfig()
+}

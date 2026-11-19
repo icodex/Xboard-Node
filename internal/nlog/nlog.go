@@ -31,6 +31,7 @@ type NodeLog struct {
 // Global logger state
 var (
 	mu          sync.RWMutex
+	defaultNode string
 	nodeLoggers = make(map[string]*NodeLog)
 
 	logMu     sync.RWMutex
@@ -68,6 +69,14 @@ func formatMsg(msg string, args []any) string {
 		}
 	}
 	return b.String()
+}
+
+// SetDefault sets the default node prefix for core-level logs.
+// Retained for callers that still set it; Core() keeps its own "core" prefix.
+func SetDefault(prefix string) {
+	mu.Lock()
+	defaultNode = prefix
+	mu.Unlock()
 }
 
 // ForNode returns a NodeLog for the given protocol and port.

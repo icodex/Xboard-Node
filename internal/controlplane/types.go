@@ -83,6 +83,7 @@ type Sink interface {
 	Report(payload ReportPayload) error
 	ReportDevices(push PushClient, devices map[int][]string) bool
 	SupportsReporting() bool
+	SupportsDeviceReports() bool
 }
 
 type ControlPlane interface {

@@ -59,3 +59,6 @@ func (l *LocalControlPlane) ReportDevices(push PushClient, devices map[int][]str
 	return false
 }
 func (l *LocalControlPlane) Metrics() APIMetrics { return APIMetrics{} }
+
+// SupportsDeviceReports reports whether device snapshots can be pushed.
+func (p *LocalControlPlane) SupportsDeviceReports() bool { return false }
