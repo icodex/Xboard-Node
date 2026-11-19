@@ -631,3 +631,132 @@ func TestApplyUserDeltaBatchPreservesOrder(t *testing.T) {
 		t.Fatal("lastUserHash must match the applied set")
 	}
 }
+
+// The main loop applies the deferred config when it receives the cert update,
+// and applyChanges defers again while certWorkers > 0. The worker must
+// therefore release its counter before the update is observable, otherwise the
+// deferred config can be lost: the loop re-defers on an update nobody resends.
+func TestCertUpdateArrivesAfterWorkerRelease(t *testing.T) {
+	s := newTestService(&fakeKernel{running: true})
+	s.certUpdates = make(chan certUpdate) // unbuffered: hand-off exposes ordering
+	s.certReconfigure = func(context.Context, config.CertConfig) (bool, error) {
+		return true, nil
+	}
+	s.startCertReconfigure(context.Background(), config.CertConfig{CertMode: "self"})
+
+	select {
+	case <-s.certUpdates:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the cert update")
+	}
+	if got := s.certWorkers.Load(); got != 0 {
+		t.Fatalf("certWorkers = %d after the update was delivered; the main loop would re-defer and strand the config", got)
+	}
+}
+
+// Reproduces the main loop's deferred-config replay: a config change during a
+// certificate reconfiguration must be applied once the update arrives, not
+// re-deferred (which would strand it because no second update is sent).
+func TestDeferredConfigReplaysOnCertUpdate(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	s.lastConfig = &model.NodeSpec{Protocol: "vless"}
+	s.lastUsers = []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.certReconfigure = func(context.Context, config.CertConfig) (bool, error) {
+		close(started)
+		<-release
+		return true, nil
+	}
+	s.startCertReconfigure(context.Background(), config.CertConfig{CertMode: "self"})
+	<-started
+
+	s.applyChanges(context.Background(), true, false)
+	if k.reloadCalls != 0 || !s.configDeferred.Load() {
+		t.Fatalf("config should be deferred while the cert worker runs (reloads=%d deferred=%v)",
+			k.reloadCalls, s.configDeferred.Load())
+	}
+
+	close(release)
+	select {
+	case upd := <-s.certUpdates:
+		deferred := s.configDeferred.Swap(false)
+		if upd.changed || deferred {
+			s.applyChanges(context.Background(), true, false)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the cert update")
+	}
+	if k.reloadCalls != 1 {
+		t.Fatalf("Reload calls = %d, want exactly 1 after the cert update", k.reloadCalls)
+	}
+	if s.configDeferred.Load() {
+		t.Fatal("deferred flag must be cleared after the replay")
+	}
+}
+
+// A config arriving while a worker runs replaces the pending one (latest
+// wins); the single update must carry the final config.
+func TestQueuedCertConfigLatestWins(t *testing.T) {
+	s := newTestService(&fakeKernel{running: true})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	s.certReconfigure = func(_ context.Context, cfg config.CertConfig) (bool, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return true, nil
+	}
+	s.startCertReconfigure(context.Background(), config.CertConfig{CertMode: "self", Domain: "first.test"})
+	<-started
+	s.startCertReconfigure(context.Background(), config.CertConfig{CertMode: "self", Domain: "second.test"})
+	close(release)
+
+	select {
+	case upd := <-s.certUpdates:
+		if upd.cfg.Domain != "second.test" {
+			t.Fatalf("applied domain = %q, want second.test (latest wins)", upd.cfg.Domain)
+		}
+		if !upd.ok || !upd.changed {
+			t.Fatalf("update = %+v, want ok+changed", upd)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the merged update")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("reconfigure calls = %d, want 2", got)
+	}
+}
+
+// Re-applying the same panel cert config must be a no-op. Self mode used to
+// regenerate the certificate on every unrelated panel sync, rotating the
+// served cert and forcing a kernel reload for an unchanged configuration.
+func TestApplyNodeCertSameSelfConfigIsIdempotent(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	dir := t.TempDir()
+	s.cfg = &config.Config{}
+	s.cfg.Kernel.ConfigDir = dir
+	s.cfg.Cert.CertDir = filepath.Join(dir, "certs")
+
+	cfg := config.CertConfig{CertMode: "self", Domain: "idem.test"}
+	if !s.applyNodeCert(context.Background(), &cfg, true) {
+		t.Fatal("first apply should install new material")
+	}
+	first := s.cert.TLSCert()
+	if !s.cert.HasCert() {
+		t.Fatal("expected material after first apply")
+	}
+
+	if changed := s.applyNodeCert(context.Background(), &cfg, true); changed {
+		t.Fatal("identical cert config must not report changed material")
+	}
+	second := s.cert.TLSCert()
+	if string(first.CertPEM) != string(second.CertPEM) || string(first.KeyPEM) != string(second.KeyPEM) {
+		t.Fatal("identical cert config must not regenerate the certificate")
+	}
+}

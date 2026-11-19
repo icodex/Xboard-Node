@@ -338,6 +338,9 @@ func (s *Service) shutdownWorkers() {
 		s.wsCancel()
 	}
 	waitCount(s.certWorkers.Load, s.shutdownWait, 3*time.Second)
+	if n := s.certWorkers.Load(); n > 0 {
+		nlog.Core().Warn("certificate workers still running after the shutdown wait; they may outlive this service instance", "workers", n)
+	}
 	waitCount(s.pushInFlight.Load, s.pushWait, 3*time.Second)
 }
 
@@ -678,7 +681,18 @@ const (
 )
 
 func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig) {
-	defer s.certWorkers.Add(-1)
+	// applyChanges defers any config change while certWorkers > 0, and the
+	// update handler replays it. The counter must already be 0 when the update
+	// is observable, otherwise the handler re-defers and nobody sends a second
+	// update: the deferred kernel reload is stranded.
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			s.certWorkers.Add(-1)
+		}
+	}
+	defer release()
 
 	maxAttempts := s.certRetryAttempts
 	if maxAttempts <= 0 {
@@ -751,6 +765,7 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 
 		// Report once, after every queued config is handled, so the main loop
 		// reloads a single time with the final certificate material.
+		release()
 		select {
 		case s.certUpdates <- certUpdate{cfg: applied, changed: changedAny, ok: okAny}:
 		case <-ctx.Done():
