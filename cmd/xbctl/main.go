@@ -212,8 +212,8 @@ func printUsage() {
   xbctl config health-port [--config PATH]
   xbctl service status|start|stop|restart|enable|disable|logs
   xbctl health
-  xbctl bind add-node --panel-url URL --token TOKEN --node-id ID [--node-type TYPE] [--kernel singbox|xray|auto]
-  xbctl bind add-machine --panel-url URL --token TOKEN --machine-id ID [--kernel singbox|xray|auto]
+  xbctl bind add-node --panel-url URL [--token TOKEN | --token-file PATH | --token-stdin] --node-id ID [--node-type TYPE] [--kernel singbox|xray|auto]
+  xbctl bind add-machine --panel-url URL [--token TOKEN | --token-file PATH | --token-stdin] --machine-id ID [--kernel singbox|xray|auto]
   xbctl bind remove <instance-id>
   xbctl bind remove-node --panel URL --node-id ID
   xbctl bind remove-machine --panel URL --machine-id ID
@@ -1299,6 +1299,7 @@ func runConfigInit(args []string) error {
 		token          string
 		tokenFile      string
 		tokenFromStdin bool
+		tokenArgGiven  bool
 		releaseVersion string
 	)
 
@@ -1375,6 +1376,7 @@ func runConfigInit(args []string) error {
 		case "--token":
 			i++
 			token = args[i]
+			tokenArgGiven = true
 			fmt.Fprintln(os.Stderr, "warning: --token is visible in the process list and shell history; prefer --token-stdin or --token-file")
 		case "--token-file":
 			i++
@@ -1385,6 +1387,11 @@ func runConfigInit(args []string) error {
 		}
 	}
 
+	if tokenFromStdin && (tokenFile != "" || tokenArgGiven) {
+		fmt.Fprintln(os.Stderr, "warning: multiple token sources given; using --token-stdin")
+	} else if tokenFile != "" && tokenArgGiven {
+		fmt.Fprintln(os.Stderr, "warning: multiple token sources given; using --token-file")
+	}
 	if tokenFromStdin {
 		data, err := io.ReadAll(io.LimitReader(stdinReader, 8192))
 		if err != nil {

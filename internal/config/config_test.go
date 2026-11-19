@@ -709,6 +709,9 @@ func TestLoadRoot_IgnoresLegacyEnvOverridesForInstances(t *testing.T) {
 	t.Setenv("API_KEY", "legacy-token")
 	t.Setenv("API_HOST", "https://legacy.example")
 	t.Setenv("NODE_ID", "99")
+	// Shared knobs are not identity-bearing and still apply to every instance.
+	t.Setenv("KERNEL_TYPE", "xray")
+	t.Setenv("LOG_LEVEL", "debug")
 
 	path := writeTemp(t, `
 instances:
@@ -742,6 +745,9 @@ instances:
 		if inst.Panel.URL != w.url || inst.Panel.Token != w.token || inst.Panel.NodeID != w.nodeID {
 			t.Fatalf("instance %d identity = %q/%q/%d, want %q/%q/%d",
 				i, inst.Panel.URL, inst.Panel.Token, inst.Panel.NodeID, w.url, w.token, w.nodeID)
+		}
+		if inst.Kernel.Type != "xray" || inst.Log.Level != "debug" {
+			t.Fatalf("instance %d shared overrides = kernel %q log %q, want xray/debug", i, inst.Kernel.Type, inst.Log.Level)
 		}
 	}
 }

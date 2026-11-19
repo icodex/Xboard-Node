@@ -247,14 +247,14 @@ func LoadRoot(path string) (*RootConfig, error) {
 	return rc, nil
 }
 
-// legacyEnvOverrideKeys are the single-instance shorthands (mostly the Docker
-// -e apiHost/apiKey pair). In a multi-instance config they would overwrite
-// every instance's panel identity with the same URL/token/node_id.
-var legacyEnvOverrideKeys = []string{
+// legacyIdentityEnvKeys are the single-instance shorthands that carry a panel
+// or certificate identity (mostly the Docker -e apiHost/apiKey pair). In a
+// multi-instance config they would overwrite every instance's identity with
+// the same values.
+var legacyIdentityEnvKeys = []string{
 	"apiHost", "API_HOST", "apiKey", "API_KEY", "nodeID", "NODE_ID",
-	"nodeType", "NODE_TYPE", "kernel", "KERNEL_TYPE",
-	"certFile", "CERT_FILE", "keyFile", "KEY_FILE", "domain", "DOMAIN",
-	"logLevel", "LOG_LEVEL", "MACHINE_ID", "MACHINE_TOKEN",
+	"nodeType", "NODE_TYPE", "certFile", "CERT_FILE", "keyFile", "KEY_FILE",
+	"domain", "DOMAIN", "MACHINE_ID", "MACHINE_TOKEN",
 }
 
 func (rc *RootConfig) applyEnvOverrides() {
@@ -262,14 +262,29 @@ func (rc *RootConfig) applyEnvOverrides() {
 		rc.Config.applyEnvOverrides()
 		return
 	}
-	// Legacy env overrides are single-instance shorthands: applying them to
+	// Identity overrides are single-instance shorthands: applying them to
 	// every instance silently replaces each panel identity (token/URL/node_id)
-	// with one value and breaks the per-instance isolation. Ignore them and
-	// say so; instance token_env references are resolved separately.
-	for _, key := range legacyEnvOverrideKeys {
+	// with one value and breaks the per-instance isolation. Ignore them and say
+	// so; instance token_env references are resolved separately. Shared knobs
+	// (kernel type, log level) still apply to every instance.
+	for _, key := range legacyIdentityEnvKeys {
 		if os.Getenv(key) != "" {
-			nlog.Core().Warn("ignoring legacy environment override in multi-instance config", "env", key)
+			nlog.Core().Warn("ignoring identity environment override in multi-instance config", "env", key)
 		}
+	}
+	for i := range rc.Instances {
+		rc.Instances[i].applySharedEnvOverrides()
+	}
+}
+
+// applySharedEnvOverrides applies the legacy environment values that are safe to
+// share between instances. Identity-bearing values are deliberately excluded.
+func (c *Config) applySharedEnvOverrides() {
+	if v := envFirst("kernel", "KERNEL_TYPE"); v != "" {
+		c.Kernel.Type = v
+	}
+	if v := envFirst("logLevel", "LOG_LEVEL"); v != "" {
+		c.Log.Level = v
 	}
 }
 

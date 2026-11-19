@@ -65,7 +65,7 @@ xbctl service restart
 
 Legacy single-panel config is fully compatible. Appending bindings auto-migrates to `instances` format.
 
-Legacy environment overrides (`apiHost`/`apiKey`/`nodeID`, `DOMAIN`, `MACHINE_TOKEN`, …) apply only to a legacy single-instance config. In `instances:` mode they are ignored (with a warning) so each instance keeps its own panel identity; per-instance `token_env` references still work. `kernel.type` accepts `singbox`, `xray` or `auto` (kernel picked per node protocol/transport). See `config.yml.example` for the full field reference.
+Legacy identity overrides (`apiHost`/`apiKey`/`nodeID`, `DOMAIN`, `MACHINE_TOKEN`, …) apply only to a legacy single-instance config. In `instances:` mode they are ignored (with a warning) so each instance keeps its own panel identity; shared knobs (`KERNEL_TYPE`, `LOG_LEVEL`) still apply, and per-instance `token_env` references still work. Note that `sudo` drops the environment: use `sudo -E` (or `env_keep`) when relying on `XBOARD_TOKEN`. `kernel.type` accepts `singbox`, `xray` or `auto` (kernel picked per node protocol/transport). See `config.yml.example` for the full field reference.
 
 ## Extensions
 

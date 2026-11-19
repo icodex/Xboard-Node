@@ -178,7 +178,8 @@ usage() {
     --panel, -a      Panel URL
     --token-file     File holding the panel token (recommended), or
     --token, -t      Panel server token (visible in ps/history), or
-                     the XBOARD_TOKEN environment variable
+                     the XBOARD_TOKEN environment variable (with sudo, use
+                     sudo -E or env_keep; sudo drops the environment)
     --node-id, -n    Node ID
 
   REQUIRED FOR MACHINE MODE:
