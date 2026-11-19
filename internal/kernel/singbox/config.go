@@ -885,11 +885,12 @@ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
 		if tls := buildTLSConfig(nc, tc); tls != nil {
 			// Naive is an HTTP/2 proxy protocol: without an h2 ALPN the TLS
 			// handshake negotiates http/1.1 and the inbound rejects CONNECT.
-			// Mirror the hysteria/tuic h3 default when the panel omits alpn.
-			if _, ok := tls["alpn"]; !ok {
+			// Mirror the hysteria/tuic h3 default when the panel omits or
+			// empties alpn.
+			base["tls"] = tls
+			if !alpnHasValue(tls["alpn"]) {
 				tls["alpn"] = []string{"h2"}
 			}
-			base["tls"] = tls
 		}
 	}
 	return base
@@ -1038,7 +1039,9 @@ func buildTLSConfig(nc *model.NodeSpec, tc kernel.TLSCert) M {
 		if sn, ok := nc.TLSSettings["server_name"]; ok && sn != "" {
 			t["server_name"] = sn
 		}
-		if alpn, ok := nc.TLSSettings["alpn"]; ok {
+		// A panel that sends "alpn": null must not shadow the protocol default
+		// (naive needs h2, QUIC protocols need h3): treat null as absent.
+		if alpn, ok := nc.TLSSettings["alpn"]; ok && alpn != nil {
 			t["alpn"] = alpn
 		}
 		// ECH server-side: only key/key_path needed for inbound
@@ -1202,4 +1205,22 @@ func extractECHInbound(tlsSettings map[string]interface{}) M {
 		nlog.Core().Warn("ECH enabled but no key or key_path provided")
 	}
 	return ech // let sing-box report a clear error if key is missing
+}
+
+// alpnHasValue reports whether a panel-provided ALPN value is usable (a
+// non-empty string or list); null and empty lists fall back to the protocol
+// default.
+func alpnHasValue(v any) bool {
+	switch alpn := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(alpn) != ""
+	case []string:
+		return len(alpn) > 0
+	case []any:
+		return len(alpn) > 0
+	default:
+		return true
+	}
 }

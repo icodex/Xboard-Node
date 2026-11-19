@@ -1385,3 +1385,29 @@ func TestBuildInbound_QuicIgnoredOnNonQUICProtocols(t *testing.T) {
 		t.Error("quic options must not apply to non-QUIC protocols")
 	}
 }
+
+// The panel sends "alpn": null for TLS inbounds. That must not shadow the
+// naive h2 default (once it did, and every naive client failed the handshake).
+func TestBuildNaiveALPNNullFallsBackToH2(t *testing.T) {
+	tc := kernel.TLSCert{CertPEM: []byte("cert"), KeyPEM: []byte("key")}
+	nc := &model.NodeSpec{Protocol: "naive", TLS: 1, TLSSettings: map[string]any{"alpn": nil}}
+	base := M{"type": "naive"}
+	in := buildNaive(base, nc, nil, tc)
+	tls, ok := in["tls"].(M)
+	if !ok {
+		t.Fatalf("tls config missing: %#v", in["tls"])
+	}
+	alpn, ok := tls["alpn"].([]string)
+	if !ok || len(alpn) != 1 || alpn[0] != "h2" {
+		t.Fatalf("alpn = %#v, want [h2]", tls["alpn"])
+	}
+}
+
+func TestBuildNaiveALPNKeptWhenSet(t *testing.T) {
+	tc := kernel.TLSCert{CertPEM: []byte("cert"), KeyPEM: []byte("key")}
+	nc := &model.NodeSpec{Protocol: "naive", TLS: 1, TLSSettings: map[string]any{"alpn": []any{"h2", "http/1.1"}}}
+	in := buildNaive(M{"type": "naive"}, nc, nil, tc)
+	if got := in["tls"].(M)["alpn"]; !alpnHasValue(got) {
+		t.Fatalf("alpn lost: %#v", got)
+	}
+}
