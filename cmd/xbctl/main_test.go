@@ -213,3 +213,76 @@ func TestConfigInitRefusesToOverwriteUnparsableConfig(t *testing.T) {
 		t.Fatalf("config was rewritten:\n%s", got)
 	}
 }
+
+func TestConfigInitTokenFileTightensPermissions(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte("file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "config.yml")
+	creds := filepath.Join(dir, "credentials.env")
+	if err := os.WriteFile(out, []byte("stale: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(creds, []byte("OLD=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runConfigInit([]string{
+		"--mode", "node",
+		"--panel-url", "https://panel.example",
+		"--node-id", "7",
+		"--token-file", tokenPath,
+		"--output", out,
+		"--credentials-out", creds,
+		"--install-root", dir,
+	})
+	if err != nil {
+		t.Fatalf("runConfigInit: %v", err)
+	}
+
+	for _, path := range []string{out, creds} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s mode = %o, want 600", filepath.Base(path), got)
+		}
+	}
+	body, err := os.ReadFile(creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("file-secret")) {
+		t.Fatalf("credentials missing the token: %s", body)
+	}
+}
+
+func TestConfigInitTokenFromStdin(t *testing.T) {
+	old := stdinReader
+	stdinReader = strings.NewReader("stdin-secret\n")
+	defer func() { stdinReader = old }()
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "config.yml")
+	err := runConfigInit([]string{
+		"--mode", "node",
+		"--panel-url", "https://panel.example",
+		"--node-id", "7",
+		"--token-stdin",
+		"--output", out,
+		"--install-root", dir,
+	})
+	if err != nil {
+		t.Fatalf("runConfigInit: %v", err)
+	}
+	root, err := loadWritableRootConfig(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.Instances) != 1 || root.Instances[0].Panel.Token != "stdin-secret" {
+		t.Fatalf("token not read from stdin: %+v", root.Instances)
+	}
+}

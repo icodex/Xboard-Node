@@ -438,3 +438,27 @@ func TestReconfigureAfterStopFails(t *testing.T) {
 		t.Fatal("a stopped manager must not re-arm state")
 	}
 }
+
+// os.WriteFile-like skip paths must still tighten a pre-existing
+// world-readable key, otherwise an old 0644 privkey.pem stays readable.
+func TestPersistPEMTightensExistingKeyPermissions(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := generateSelfSignedPair(t, "perm.test")
+	if err := os.WriteFile(filepath.Join(dir, defaultCertFile), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, defaultKeyFile), keyPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(config.CertConfig{CertDir: dir})
+	m.persistPEMTo(dir, certPEM, keyPEM)
+
+	fi, err := os.Stat(filepath.Join(dir, defaultKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("key mode = %o, want 600", got)
+	}
+}

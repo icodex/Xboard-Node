@@ -33,6 +33,7 @@ ACTION="${DEFAULT_ACTION}"
 MODE=""
 PANEL_URL=""
 TOKEN=""
+TOKEN_FILE=""
 NODE_ID=""
 NODE_TYPE=""
 MACHINE_ID=""
@@ -175,12 +176,15 @@ usage() {
 
   REQUIRED FOR NODE MODE:
     --panel, -a      Panel URL
-    --token, -t      Panel server token
+    --token-file     File holding the panel token (recommended), or
+    --token, -t      Panel server token (visible in ps/history), or
+                     the XBOARD_TOKEN environment variable
     --node-id, -n    Node ID
 
   REQUIRED FOR MACHINE MODE:
     --panel, -a       Panel URL
-    --token, -t       Machine token
+    --token-file      File holding the machine token (recommended), or
+    --token, -t       Machine token, or XBOARD_TOKEN
     --machine-id      Machine ID
 
   OPTIONAL:
@@ -197,8 +201,9 @@ usage() {
     --yes, -y           Non-interactive confirmation for destructive operations
 
   EXAMPLES:
-    sudo bash install.sh --panel https://panel.example.com --token TOKEN --node-id 1
-    sudo bash install.sh --panel https://panel.example.com --token TOKEN --machine-id 1
+    install -m 600 /dev/null /root/xboard-token && printf '%s' "$TOKEN" > /root/xboard-token
+    sudo bash install.sh --panel https://panel.example.com --token-file /root/xboard-token --node-id 1
+    sudo bash install.sh --panel https://panel.example.com --token-file /root/xboard-token --machine-id 1
     sudo bash install.sh upgrade
     sudo bash install.sh uninstall --purge --yes
 
@@ -223,6 +228,11 @@ parse_args() {
                 ;;
             --token|-t)
                 TOKEN="$2"
+                log_warn "--token is visible in the process list and shell history; prefer --token-file or XBOARD_TOKEN"
+                shift 2
+                ;;
+            --token-file)
+                TOKEN_FILE="$2"
                 shift 2
                 ;;
             --node-id|-n)
@@ -305,6 +315,11 @@ parse_args() {
         else
             MODE="node"
         fi
+    fi
+
+    # XBOARD_TOKEN keeps the secret out of argv entirely.
+    if [ -z "$TOKEN" ] && [ -z "$TOKEN_FILE" ] && [ -n "${XBOARD_TOKEN:-}" ]; then
+        TOKEN="$XBOARD_TOKEN"
     fi
 
     case "$MODE" in
@@ -413,8 +428,8 @@ validate_install_request() {
         log_error "Panel URL is required"
         exit 1
     fi
-    if [ -z "$TOKEN" ]; then
-        log_error "Token is required"
+    if [ -z "$TOKEN" ] && [ -z "$TOKEN_FILE" ]; then
+        log_error "Token is required (--token-file or XBOARD_TOKEN recommended)"
         exit 1
     fi
     if ! [[ "$HEALTH_PORT" =~ ^[0-9]+$ ]]; then
@@ -550,13 +565,17 @@ render_config() {
         --panel-url "$PANEL_URL"
         --kernel "${KERNEL_TYPE:-singbox}"
         --health-port "${HEALTH_PORT:-0}"
-        --token "$TOKEN"
         --version "$RELEASE_VERSION"
         --output "$TMP_DIR/config.yml"
         --credentials-out "$TMP_DIR/credentials.env"
         --meta "$TMP_DIR/install-meta.json"
         --install-root "$INSTALL_ROOT"
     )
+    if [ -n "${TOKEN_FILE:-}" ]; then
+        init_args+=(--token-file "$TOKEN_FILE")
+    else
+        init_args+=(--token "$TOKEN")
+    fi
     if [ -f "$CONFIG_FILE" ]; then
         init_args+=(--config "$CONFIG_FILE")
     fi

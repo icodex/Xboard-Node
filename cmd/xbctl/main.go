@@ -874,6 +874,19 @@ func hasCertConfig(c config.CertConfig) bool {
 		c.CertContent != "" || c.KeyContent != ""
 }
 
+// writeSecretFile writes data 0600 on creation and tightens pre-existing
+// files: os.WriteFile only applies perm when it creates the file, so a
+// leftover 0644 credentials/config stayed world-readable.
+func writeSecretFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func writeRootConfig(path string, root *config.RootConfig) error {
 	instances := root.Instances
 	if len(instances) == 0 && root.Config.Panel.URL != "" {
@@ -970,7 +983,7 @@ func writeRootConfig(path string, root *config.RootConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	return writeSecretFile(path, data)
 }
 
 func pruneCredentialKeys(path string, removed, remaining []config.Config) error {
@@ -1028,7 +1041,7 @@ func pruneCredentialKeys(path string, removed, remaining []config.Config) error 
 	if output != "" {
 		output += "\n"
 	}
-	return os.WriteFile(path, []byte(output), 0o600)
+	return writeSecretFile(path, []byte(output))
 }
 
 func writeInstallMeta(path string, root *config.RootConfig) error {
@@ -1577,7 +1590,7 @@ func mergeCredentials(srcPath, dstPath, key, value string) error {
 	for _, k := range order {
 		fmt.Fprintf(&buf, "%s=%s\n", k, entries[k])
 	}
-	return os.WriteFile(dstPath, []byte(buf.String()), 0o600)
+	return writeSecretFile(dstPath, []byte(buf.String()))
 }
 
 // writeInstallMetaVersioned writes install-meta.json with an explicit

@@ -34,13 +34,19 @@ docker compose up -d
 ### Installer (Linux systemd)
 
 ```bash
+# Preferred: keep the token out of argv (visible in ps and shell history).
+install -m 600 /dev/null /root/xboard-token
+printf '%s' 'TOKEN' > /root/xboard-token
+
 # Node mode
 curl -fsSL https://raw.githubusercontent.com/icodex/xboard-node/dev/install.sh | \
-  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1
+  sudo bash -s -- --mode node --panel https://panel.example.com \
+  --token-file /root/xboard-token --node-id 1
 
 # Machine mode
 curl -fsSL https://raw.githubusercontent.com/icodex/xboard-node/dev/install.sh | \
-  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1
+  sudo bash -s -- --mode machine --panel https://panel.example.com \
+  --token-file /root/xboard-token --machine-id 1
 
 ## xbctl
 
@@ -49,15 +55,17 @@ Run `xbctl` after installation for help. Common commands:
 ```bash
 xbctl list                          # list all instances
 xbctl status                        # running status
-xbctl bind add-node --panel URL --token TOKEN --node-id 1
-xbctl bind add-machine --panel URL --token TOKEN --machine-id 1
+xbctl bind add-node --panel URL --token-file /root/xboard-token --node-id 1
+xbctl bind add-machine --panel URL --token-file /root/xboard-token --machine-id 1
 xbctl bind remove-node --panel URL --node-id 1
 xbctl service restart
 ```
 
 ## Configuration
 
-Legacy single-panel config is fully compatible. Appending bindings auto-migrates to `instances` format. `kernel.type` accepts `singbox`, `xray` or `auto` (kernel picked per node protocol/transport). See `config.yml.example` for the full field reference.
+Legacy single-panel config is fully compatible. Appending bindings auto-migrates to `instances` format.
+
+Legacy environment overrides (`apiHost`/`apiKey`/`nodeID`, `DOMAIN`, `MACHINE_TOKEN`, …) apply only to a legacy single-instance config. In `instances:` mode they are ignored (with a warning) so each instance keeps its own panel identity; per-instance `token_env` references still work. `kernel.type` accepts `singbox`, `xray` or `auto` (kernel picked per node protocol/transport). See `config.yml.example` for the full field reference.
 
 ## Extensions
 
