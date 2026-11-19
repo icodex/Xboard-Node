@@ -247,13 +247,29 @@ func LoadRoot(path string) (*RootConfig, error) {
 	return rc, nil
 }
 
+// legacyEnvOverrideKeys are the single-instance shorthands (mostly the Docker
+// -e apiHost/apiKey pair). In a multi-instance config they would overwrite
+// every instance's panel identity with the same URL/token/node_id.
+var legacyEnvOverrideKeys = []string{
+	"apiHost", "API_HOST", "apiKey", "API_KEY", "nodeID", "NODE_ID",
+	"nodeType", "NODE_TYPE", "kernel", "KERNEL_TYPE",
+	"certFile", "CERT_FILE", "keyFile", "KEY_FILE", "domain", "DOMAIN",
+	"logLevel", "LOG_LEVEL", "MACHINE_ID", "MACHINE_TOKEN",
+}
+
 func (rc *RootConfig) applyEnvOverrides() {
 	if len(rc.Instances) == 0 {
 		rc.Config.applyEnvOverrides()
 		return
 	}
-	for i := range rc.Instances {
-		rc.Instances[i].applyEnvOverrides()
+	// Legacy env overrides are single-instance shorthands: applying them to
+	// every instance silently replaces each panel identity (token/URL/node_id)
+	// with one value and breaks the per-instance isolation. Ignore them and
+	// say so; instance token_env references are resolved separately.
+	for _, key := range legacyEnvOverrideKeys {
+		if os.Getenv(key) != "" {
+			nlog.Core().Warn("ignoring legacy environment override in multi-instance config", "env", key)
+		}
 	}
 }
 
@@ -939,6 +955,29 @@ func ValidateStartupLayout(instances []*Config) error {
 	healthPorts := make(map[int]string)
 	configDirs := make(map[string]string)
 	nodeBindings := make(map[string]string)
+	certDirs := make(map[string]string) // resolved dir → normalized domain
+	certOwners := make(map[string]string)
+
+	// Same directory is allowed only for the same non-empty domain (nodes
+	// inheriting one cert share the issuance). An empty domain is per-instance
+	// exclusive: two instances would overwrite each other's privkey.pem.
+	recordCertDir := func(dir, domain, owner string) error {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return nil
+		}
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if prev, ok := certDirs[dir]; ok {
+			if prev == "" || domain == "" || prev != domain {
+				return fmt.Errorf("cert.cert_dir %q is shared by %s and %s with different domains", dir, certOwners[dir], owner)
+			}
+			return nil
+		}
+		certDirs[dir] = domain
+		certOwners[dir] = owner
+		return nil
+	}
+
 	for _, instance := range instances {
 		if instance == nil {
 			continue
@@ -959,6 +998,9 @@ func ValidateStartupLayout(instances []*Config) error {
 		// Machine mode discovers nodes dynamically — skip static binding check,
 		// but still validate custom_config if set at the instance level.
 		if instance.IsMachineMode() {
+			if err := recordCertDir(instance.Cert.CertDir, instance.Cert.Domain, owner); err != nil {
+				return err
+			}
 			if path := strings.TrimSpace(instance.Kernel.CustomConfig); path != "" {
 				if _, err := os.Stat(path); err != nil {
 					return fmt.Errorf("kernel.custom_config %q for %s: %w", path, owner, err)
@@ -972,6 +1014,10 @@ func ValidateStartupLayout(instances []*Config) error {
 				return fmt.Errorf("node binding %s is declared by both %s and %s", binding, other, owner)
 			}
 			nodeBindings[binding] = owner
+			nodeOwner := fmt.Sprintf("%s/node-%d", owner, node.Panel.NodeID)
+			if err := recordCertDir(node.Cert.CertDir, node.Cert.Domain, nodeOwner); err != nil {
+				return err
+			}
 			if path := strings.TrimSpace(node.Kernel.CustomConfig); path != "" {
 				if _, err := os.Stat(path); err != nil {
 					return fmt.Errorf("kernel.custom_config %q for %s: %w", path, owner, err)

@@ -702,3 +702,103 @@ panel:
 		})
 	}
 }
+
+// Legacy single-instance env shorthands must not overwrite every instance's
+// panel identity in multi-instance mode.
+func TestLoadRoot_IgnoresLegacyEnvOverridesForInstances(t *testing.T) {
+	t.Setenv("API_KEY", "legacy-token")
+	t.Setenv("API_HOST", "https://legacy.example")
+	t.Setenv("NODE_ID", "99")
+
+	path := writeTemp(t, `
+instances:
+  - instance_id: alpha
+    panel:
+      url: "https://a.example"
+      token: "token-a"
+      node_id: 1
+  - instance_id: beta
+    panel:
+      url: "https://b.example"
+      token: "token-b"
+      node_id: 2
+`)
+	root, err := LoadRoot(path)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	want := []struct {
+		url, token string
+		nodeID     int
+	}{
+		{"https://a.example", "token-a", 1},
+		{"https://b.example", "token-b", 2},
+	}
+	if len(root.Instances) != len(want) {
+		t.Fatalf("instances = %d, want %d", len(root.Instances), len(want))
+	}
+	for i, w := range want {
+		inst := root.Instances[i]
+		if inst.Panel.URL != w.url || inst.Panel.Token != w.token || inst.Panel.NodeID != w.nodeID {
+			t.Fatalf("instance %d identity = %q/%q/%d, want %q/%q/%d",
+				i, inst.Panel.URL, inst.Panel.Token, inst.Panel.NodeID, w.url, w.token, w.nodeID)
+		}
+	}
+}
+
+func TestValidateStartupLayout_CertDirDomainConflicts(t *testing.T) {
+	instance := func(id, dir, domain string) *Config {
+		return &Config{
+			InstanceID: id,
+			Panel:      PanelConfig{URL: "https://" + id + ".example", NodeID: 1},
+			Kernel:     KernelConfig{ConfigDir: "/tmp/" + id},
+			Cert:       CertConfig{CertDir: dir, Domain: domain},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		instances []*Config
+		wantErr   bool
+	}{
+		{
+			name:      "same dir same domain allowed",
+			instances: []*Config{instance("a", "/etc/certs", "example.com"), instance("b", "/etc/certs", "EXAMPLE.com")},
+		},
+		{
+			name:      "same dir different domains rejected",
+			instances: []*Config{instance("a", "/etc/certs", "a.example"), instance("b", "/etc/certs", "b.example")},
+			wantErr:   true,
+		},
+		{
+			name:      "same dir empty domain rejected",
+			instances: []*Config{instance("a", "/etc/certs", ""), instance("b", "/etc/certs", "")},
+			wantErr:   true,
+		},
+		{
+			name:      "distinct dirs allowed",
+			instances: []*Config{instance("a", "/etc/a/certs", "a.example"), instance("b", "/etc/b/certs", "b.example")},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateStartupLayout(tc.instances)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateStartupLayout err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("nodes inheriting one cert share it", func(t *testing.T) {
+		cfg := &Config{
+			InstanceID: "base",
+			Kernel:     KernelConfig{ConfigDir: "/tmp/base"},
+			Cert:       CertConfig{CertDir: "/tmp/base/certs", Domain: "example.com"},
+			Nodes:      []NodeEntry{{NodeID: 1}, {NodeID: 2}},
+		}
+		if err := ValidateStartupLayout(cfg.ExpandNodes()); err != nil {
+			t.Fatalf("shared inherited cert must be allowed: %v", err)
+		}
+	})
+}

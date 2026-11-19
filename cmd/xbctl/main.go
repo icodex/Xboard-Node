@@ -36,6 +36,9 @@ const (
 var (
 	version   = "dev"
 	buildTime = "unknown"
+
+	// stdinReader is replaceable in tests; token input never goes through argv.
+	stdinReader io.Reader = os.Stdin
 )
 
 type instanceRow struct {
@@ -204,7 +207,8 @@ func printUsage() {
   xbctl list [--output text|json]
   xbctl instance list [--output text|json]
   xbctl instance get <id> [--output text|json]
-  xbctl config init --mode node|machine --panel-url URL --token TOKEN [flags]
+  xbctl config init --mode node|machine --panel-url URL --token-stdin [flags]
+      (or --token-file PATH; --token TOKEN is visible in the process list)
   xbctl config health-port [--config PATH]
   xbctl service status|start|stop|restart|enable|disable|logs
   xbctl health
@@ -1280,10 +1284,16 @@ func runConfigInit(args []string) error {
 		gogc           int
 		installRoot    string
 		token          string
+		tokenFile      string
+		tokenFromStdin bool
 		releaseVersion string
 	)
 
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--token-stdin" {
+			tokenFromStdin = true
+			continue
+		}
 		if i+1 >= len(args) {
 			break
 		}
@@ -1352,10 +1362,28 @@ func runConfigInit(args []string) error {
 		case "--token":
 			i++
 			token = args[i]
+			fmt.Fprintln(os.Stderr, "warning: --token is visible in the process list and shell history; prefer --token-stdin or --token-file")
+		case "--token-file":
+			i++
+			tokenFile = args[i]
 		case "--version":
 			i++
 			releaseVersion = args[i]
 		}
+	}
+
+	if tokenFromStdin {
+		data, err := io.ReadAll(io.LimitReader(stdinReader, 8192))
+		if err != nil {
+			return fmt.Errorf("read token from stdin: %w", err)
+		}
+		token = strings.TrimSpace(string(data))
+	} else if tokenFile != "" {
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return fmt.Errorf("read token file: %w", err)
+		}
+		token = strings.TrimSpace(string(data))
 	}
 
 	if mode == "" {

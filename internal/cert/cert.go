@@ -118,12 +118,14 @@ func (m *Manager) persistPEMTo(dir string, cert, key []byte) {
 	certPath := filepath.Join(dir, defaultCertFile)
 	keyPath := filepath.Join(dir, defaultKeyFile)
 	if existing, err := os.ReadFile(certPath); err == nil && bytes.Equal(existing, cert) {
-		// Already up to date on disk (common when mounted read-only)
+		// Already up to date on disk (common when mounted read-only). Tighten a
+		// pre-existing world-readable file; best-effort like the write below.
+		_ = os.Chmod(certPath, 0o644)
 	} else if err := atomicWriteFile(certPath, cert, 0o644); err != nil {
 		nlog.Core().Warn("cert: failed to persist cert", "path", certPath, "error", err)
 	}
 	if existing, err := os.ReadFile(keyPath); err == nil && bytes.Equal(existing, key) {
-		// Already up to date on disk (common when mounted read-only)
+		_ = os.Chmod(keyPath, 0o600)
 	} else if err := atomicWriteFile(keyPath, key, 0o600); err != nil {
 		nlog.Core().Warn("cert: failed to persist key", "path", keyPath, "error", err)
 	}
