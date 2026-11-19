@@ -196,6 +196,9 @@ func TestOrchestratorRediscoverAddKeepRemove(t *testing.T) {
 	if mailboxLeft {
 		t.Fatal("node 1 mailbox should be unregistered after removal")
 	}
+
+	// Let the detached node finish before the stub server closes.
+	o.stopAll()
 }
 
 // Shared-mux WS events must land in the addressed node's mailbox, be dropped
@@ -426,5 +429,63 @@ func TestAwaitStop(t *testing.T) {
 	cancel()
 	if awaitStop(ctx, open) {
 		t.Fatal("cancelled context must abandon the wait")
+	}
+}
+
+// A node restarted with the same ID must wait for the previous instance to
+// exit before running its service (which would bind the same ports).
+func TestStartNodeWaitsForPreviousInstance(t *testing.T) {
+	p := newPanelStub(t, []panel.MachineNode{node(1)})
+	o := newTestOrchestrator(t, p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.runCtx = ctx
+
+	prev := make(chan struct{})
+	o.mu.Lock()
+	o.stopping = map[int]<-chan struct{}{1: prev}
+	o.mu.Unlock()
+
+	o.startNode(ctx, node(1))
+
+	// The service initializes only after the previous stop: no user fetch yet.
+	time.Sleep(150 * time.Millisecond)
+	if got := p.nodeHits[1].Load(); got != 0 {
+		t.Fatalf("service started while the previous instance was still exiting (user fetches=%d)", got)
+	}
+
+	close(prev)
+	p.waitUserFetch(t, 1, 1)
+
+	o.stopAll()
+}
+
+// stopAll must also wait for nodes detached by rediscover (they are no longer
+// in o.nodes but their services are still exiting).
+func TestStopAllWaitsForDetachedNodes(t *testing.T) {
+	p := newPanelStub(t, nil)
+	o := newTestOrchestrator(t, p)
+
+	done := make(chan struct{})
+	o.mu.Lock()
+	o.stopping = map[int]<-chan struct{}{3: done}
+	o.mu.Unlock()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(done)
+	}()
+
+	start := time.Now()
+	o.stopAll()
+	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
+		t.Fatalf("stopAll did not wait for the detached node: %v", elapsed)
+	}
+
+	o.mu.Lock()
+	left := o.stopping
+	o.mu.Unlock()
+	if left != nil {
+		t.Fatalf("stopping map not cleared: %v", left)
 	}
 }

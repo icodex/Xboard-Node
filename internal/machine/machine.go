@@ -207,6 +207,12 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 		if !awaitStop(nodeCtx, prevStop) {
 			return
 		}
+		// awaitStop's select is random when both the previous stop closed and
+		// this node was cancelled concurrently: do not start a service that was
+		// already detached (it would bind ports and run initialSetup briefly).
+		if nodeCtx.Err() != nil {
+			return
+		}
 
 		cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
 		svc := service.NewWithControlPlane(nodeCfg, cp)
