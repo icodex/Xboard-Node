@@ -277,10 +277,11 @@ func (s *Service) ensureKernelResolved(spec *model.NodeSpec, resolved string) (k
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
 	s.kernel = k
-	// Stop the old kernel in the background: its drain (up to 5s) must not
-	// stall the service main loop. Instances share no state.
+	// Stop the old kernel synchronously: both kernels close their listeners
+	// before Stop returns and drain in the background, so the new instance can
+	// bind the same ports without racing an unscheduled goroutine.
 	if current != nil {
-		go current.Stop()
+		current.Stop()
 	}
 	return k, nil
 }

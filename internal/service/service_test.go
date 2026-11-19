@@ -34,6 +34,7 @@ type fakeKernel struct {
 	onUpdateUsers func([]model.UserSpec)
 	onAddUsers    func([]model.UserSpec)
 	onRemoveUsers func([]model.UserSpec)
+	onStop        func()
 
 	speedLimitFunc  func(string) *rate.Limiter
 	deviceLimitFunc func(string) (int, bool)
@@ -50,7 +51,12 @@ func (f *fakeKernel) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, t
 	f.running = true
 	return nil
 }
-func (f *fakeKernel) Stop()           { f.running = false }
+func (f *fakeKernel) Stop() {
+	f.running = false
+	if f.onStop != nil {
+		f.onStop()
+	}
+}
 func (f *fakeKernel) IsRunning() bool { return f.running }
 func (f *fakeKernel) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	_, _, _ = nodeConfig, users, tls

@@ -25,6 +25,8 @@ type NodeMailbox struct {
 	ready              bool
 	config             *model.NodeSpec
 	users              []model.UserSpec
+	userIndex          map[int]int      // user ID → index in users
+	userDeleted        map[int]struct{} // tombstoned IDs, compacted on drain
 	deviceUsers        map[int][]string
 	dirtyConfig        bool
 	dirtyUsers         bool
@@ -54,6 +56,7 @@ func (m *NodeMailbox) SeedBaseline(users []model.UserSpec, config *model.NodeSpe
 	defer m.mu.Unlock()
 	if users != nil && !m.hasFullUserState {
 		m.users = cloneUsers(users)
+		m.rebuildUserIndexLocked()
 		m.hasFullUserState = true
 	}
 	if config != nil && m.config == nil {
@@ -75,6 +78,8 @@ func (m *NodeMailbox) Apply(event Event) {
 	case EventSyncUsers:
 		if event.Users != nil {
 			m.users = cloneUsers(event.Users)
+			m.userDeleted = nil
+			m.rebuildUserIndexLocked()
 			m.dirtyUsers = true
 			m.hasFullUserState = true
 			changed = true
@@ -112,7 +117,7 @@ func (m *NodeMailbox) Apply(event Event) {
 			if !m.hasFullUserState {
 				m.needsReconcile = true
 				changed = true
-			} else if !applyUserDelta(&m.users, event.DeltaAction, event.DeltaUsers) {
+			} else if !m.applyUserDeltaLocked(event.DeltaAction, event.DeltaUsers) {
 				m.needsReconcile = true
 				changed = true
 			} else {
@@ -150,6 +155,18 @@ func (m *NodeMailbox) DrainIfReady() MailboxState {
 		m.dirtyConfig = false
 	}
 	if m.dirtyUsers {
+		if len(m.userDeleted) > 0 {
+			compacted := m.users[:0]
+			for _, user := range m.users {
+				if _, dead := m.userDeleted[user.ID]; dead {
+					continue
+				}
+				compacted = append(compacted, user)
+			}
+			m.users = compacted
+			m.userDeleted = nil
+			m.rebuildUserIndexLocked()
+		}
 		state.Users = cloneUsers(m.users)
 		state.HasUsers = true
 		m.dirtyUsers = false
@@ -245,40 +262,44 @@ func cloneDeviceUsers(devices map[int][]string) map[int][]string {
 	return cloned
 }
 
-func applyUserDelta(users *[]model.UserSpec, action string, delta []model.UserSpec) bool {
-	current := cloneUsers(*users)
-	index := make(map[int]int, len(current))
-	for i, user := range current {
-		index[user.ID] = i
+// applyUserDeltaLocked applies one add/remove without copying the whole table:
+// adds update in place or append, removes are tombstoned and compacted on the
+// next drain. Caller holds m.mu.
+func (m *NodeMailbox) applyUserDeltaLocked(action string, delta []model.UserSpec) bool {
+	if m.userIndex == nil {
+		m.rebuildUserIndexLocked()
 	}
-
 	switch action {
 	case "add":
 		for _, user := range delta {
-			if idx, ok := index[user.ID]; ok {
-				current[idx] = user
+			if idx, ok := m.userIndex[user.ID]; ok {
+				m.users[idx] = user
+				delete(m.userDeleted, user.ID)
 				continue
 			}
-			index[user.ID] = len(current)
-			current = append(current, user)
+			m.userIndex[user.ID] = len(m.users)
+			m.users = append(m.users, user)
+			delete(m.userDeleted, user.ID)
 		}
 	case "remove":
-		removeIDs := make(map[int]struct{}, len(delta))
 		for _, user := range delta {
-			removeIDs[user.ID] = struct{}{}
-		}
-		filtered := current[:0]
-		for _, user := range current {
-			if _, ok := removeIDs[user.ID]; ok {
+			if _, ok := m.userIndex[user.ID]; !ok {
 				continue
 			}
-			filtered = append(filtered, user)
+			if m.userDeleted == nil {
+				m.userDeleted = make(map[int]struct{})
+			}
+			m.userDeleted[user.ID] = struct{}{}
 		}
-		current = append([]model.UserSpec(nil), filtered...)
 	default:
 		return false
 	}
-
-	*users = current
 	return true
+}
+
+func (m *NodeMailbox) rebuildUserIndexLocked() {
+	m.userIndex = make(map[int]int, len(m.users))
+	for i, user := range m.users {
+		m.userIndex[user.ID] = i
+	}
 }

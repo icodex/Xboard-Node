@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/model"
 )
@@ -169,5 +170,50 @@ func TestIntervalDurationClamps(t *testing.T) {
 		if got := intervalDuration(tc.in); got != tc.want {
 			t.Fatalf("intervalDuration(%d) = %v, want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+// ensureKernelResolved must not return before the old kernel finished Stop:
+// a background Stop raced the new kernel's bind and could leave it on a port
+// that was still held. Both kernels now close listeners synchronously and
+// drain async, so the call is safe on the main loop.
+func TestAutoSwitchStopsOldKernelBeforeReturning(t *testing.T) {
+	stopStarted := make(chan struct{})
+	release := make(chan struct{})
+	k := &fakeKernel{
+		running: true,
+		onStop: func() {
+			close(stopStarted)
+			<-release
+		},
+	}
+	svc := newTestService(k)
+	svc.cfg = &config.Config{Kernel: config.KernelConfig{Type: "auto"}}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.ensureKernelResolved(&model.NodeSpec{Protocol: "vless", ServerPort: 1}, "xray")
+		done <- err
+	}()
+
+	select {
+	case <-stopStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old kernel was not stopped")
+	}
+	select {
+	case <-done:
+		t.Fatal("ensureKernelResolved returned while the old kernel's Stop was still running")
+	default:
+	}
+
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ensureKernelResolved: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ensureKernelResolved did not finish")
 	}
 }

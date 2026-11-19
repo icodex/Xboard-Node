@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/model"
@@ -218,5 +219,66 @@ func TestNodeMailboxDeltaFailedApplyNotifies(t *testing.T) {
 	state := mb.DrainIfReady()
 	if !state.NeedsReconcile {
 		t.Fatal("expected NeedsReconcile for invalid delta action")
+	}
+}
+
+// One delta per edited user arrives on the shared WS read goroutine. Copying
+// the whole table per event made a 10k-user bulk edit quadratic; the mailbox
+// now updates an index in place and compacts once per drain.
+func TestNodeMailboxUserDeltaDoesNotCopyWholeTable(t *testing.T) {
+	const n = 20000
+	users := make([]model.UserSpec, n)
+	for i := range users {
+		users[i] = model.UserSpec{ID: i + 1, UUID: "uuid"}
+	}
+	mb := NewNodeMailbox()
+	mb.SeedBaseline(users, nil)
+	mb.MarkReady()
+	mb.DrainIfReady()
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 200; i++ {
+		mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "add", DeltaUsers: []model.UserSpec{{ID: 1, UUID: "updated"}}})
+	}
+	runtime.ReadMemStats(&after)
+
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if limit := uint64(8 << 20); allocated > limit {
+		t.Fatalf("200 single-user updates allocated %d bytes; the table is still copied per event (limit %d)", allocated, limit)
+	}
+}
+
+func TestNodeMailboxUserDeltaOrderBeforeDrain(t *testing.T) {
+	mb := NewNodeMailbox()
+	mb.SeedBaseline([]model.UserSpec{{ID: 1, UUID: "a"}, {ID: 2, UUID: "b"}}, nil)
+	mb.MarkReady()
+
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "remove", DeltaUsers: []model.UserSpec{{ID: 2}}})
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "add", DeltaUsers: []model.UserSpec{{ID: 2, UUID: "b2"}}})
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "add", DeltaUsers: []model.UserSpec{{ID: 3, UUID: "c"}}})
+
+	state := mb.DrainIfReady()
+	if !state.HasUsers {
+		t.Fatal("delta changes were not drained")
+	}
+	want := map[int]string{1: "a", 2: "b2", 3: "c"}
+	if len(state.Users) != len(want) {
+		t.Fatalf("users = %v, want %v", state.Users, want)
+	}
+	for _, user := range state.Users {
+		if want[user.ID] != user.UUID {
+			t.Fatalf("user %d = %q, want %q", user.ID, user.UUID, want[user.ID])
+		}
+	}
+
+	if st := mb.DrainIfReady(); st.HasUsers {
+		t.Fatal("a drain without changes must not produce a users snapshot")
+	}
+
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "remove", DeltaUsers: []model.UserSpec{{ID: 1}}})
+	state = mb.DrainIfReady()
+	if len(state.Users) != 2 {
+		t.Fatalf("remove was not compacted: %v", state.Users)
 	}
 }

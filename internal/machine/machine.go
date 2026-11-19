@@ -110,7 +110,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		case <-discoveryTicker.C:
 			o.rediscover(ctx)
 			// Re-check WS enablement: the panel may turn WS on after boot.
-			if o.ws == nil {
+			if o.currentWS() == nil {
 				o.tryStartWS(ctx)
 			}
 
@@ -178,15 +178,12 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 		// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
 		perNodeClient.ResetConfigETag()
 
-		o.mu.Lock()
-		ws := o.ws
-		o.mu.Unlock()
-		var push controlplane.PushClient
-		if ws != nil {
-			push = &machineNodePush{
-				nodeID: mn.ID,
-				ws:     ws,
-			}
+		// Always provide the adapter: it resolves the shared WS per call, so a
+		// node started before the machine handshake still gets a mailbox and
+		// can report devices once WS comes up.
+		push := &machineNodePush{
+			nodeID: mn.ID,
+			ws:     o.currentWS,
 		}
 
 		// The registerFn is called by MachinePanelControlPlane.Initial() to expose
@@ -310,6 +307,18 @@ func (o *Orchestrator) reportMachineStatus() {
 
 // ─── WS mux ─────────────────────────────────────────────────────────────
 
+// currentWS returns the shared WS client, nil until the machine handshake
+// enables it. The nil check happens here: returning a typed nil *panel.WSClient
+// as wsSender would produce a non-nil interface and panic on IsConnected.
+func (o *Orchestrator) currentWS() wsSender {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.ws == nil {
+		return nil
+	}
+	return o.ws
+}
+
 func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	hs, err := o.client.Handshake()
 	if err != nil {
@@ -425,13 +434,31 @@ func (o *Orchestrator) applyIntervals(bc panel.MachineBaseConfig) {
 
 // ─── Virtual PushClient ─────────────────────────────────────────────────
 
+// wsSender is the subset of the shared WS client this adapter needs.
+type wsSender interface {
+	IsConnected() bool
+	SendRaw(event string, data json.RawMessage)
+}
+
 // machineNodePush implements controlplane.PushClient for a single node
 // backed by the shared machine WS connection. Events are routed by the
 // WS mux directly to the Service's channels; this adapter only provides
 // connectivity status and send capabilities.
+//
+// It resolves the WS client per call: the machine handshake may succeed after
+// a node was already started, and a snapshot taken at startNode time would
+// leave that node unable to report devices (or receive routed events) until
+// it was restarted.
 type machineNodePush struct {
 	nodeID int
-	ws     *panel.WSClient
+	ws     func() wsSender
+}
+
+func (p *machineNodePush) sender() wsSender {
+	if p.ws == nil {
+		return nil
+	}
+	return p.ws()
 }
 
 func (p *machineNodePush) Run(ctx context.Context) {
@@ -440,11 +467,13 @@ func (p *machineNodePush) Run(ctx context.Context) {
 }
 
 func (p *machineNodePush) IsConnected() bool {
-	return p.ws != nil && p.ws.IsConnected()
+	s := p.sender()
+	return s != nil && s.IsConnected()
 }
 
 func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {
-	if p.ws == nil {
+	s := p.sender()
+	if s == nil || !s.IsConnected() {
 		return
 	}
 	payload := map[string]interface{}{
@@ -457,5 +486,5 @@ func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {
 	}
 	payload["devices"] = strDevices
 	data, _ := json.Marshal(payload)
-	p.ws.SendRaw(panel.WSEventReportDevices, data)
+	s.SendRaw(panel.WSEventReportDevices, data)
 }

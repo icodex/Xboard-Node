@@ -294,3 +294,54 @@ func TestOrchestratorStopAllDuringStart(t *testing.T) {
 	// the signal. Convergence is proven by the handle/mailbox assertions and
 	// stopAll's <-h.done waits.
 }
+
+type fakeWSSender struct {
+	connected bool
+	events    []string
+	payloads  [][]byte
+}
+
+func (f *fakeWSSender) IsConnected() bool { return f.connected }
+func (f *fakeWSSender) SendRaw(event string, data json.RawMessage) {
+	f.events = append(f.events, event)
+	f.payloads = append(f.payloads, data)
+}
+
+// Nodes started before the machine handshake used to capture a nil WS client
+// and never report devices. The adapter must resolve the shared client per
+// call.
+func TestMachineNodePushLateBindsSharedWS(t *testing.T) {
+	var current wsSender
+	push := &machineNodePush{nodeID: 7, ws: func() wsSender { return current }}
+
+	if push.IsConnected() {
+		t.Fatal("adapter without a sender must report disconnected")
+	}
+	push.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}}) // must be a no-op
+
+	sender := &fakeWSSender{connected: true}
+	current = sender
+	if !push.IsConnected() {
+		t.Fatal("adapter must follow the shared WS once it appears")
+	}
+	push.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}})
+	if len(sender.events) != 1 || sender.events[0] != panel.WSEventReportDevices {
+		t.Fatalf("events = %v, want one %q", sender.events, panel.WSEventReportDevices)
+	}
+	var payload struct {
+		NodeID  int                 `json:"node_id"`
+		Devices map[string][]string `json:"devices"`
+	}
+	if err := json.Unmarshal(sender.payloads[0], &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if payload.NodeID != 7 || len(payload.Devices["1"]) != 1 || payload.Devices["1"][0] != "1.1.1.1" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	sender.connected = false
+	push.SendDeviceReport(map[int][]string{1: {"2.2.2.2"}})
+	if len(sender.events) != 1 {
+		t.Fatalf("disconnected sender must not deliver: %v", sender.events)
+	}
+}

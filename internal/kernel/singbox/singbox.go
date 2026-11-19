@@ -93,7 +93,7 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	// listeners make the new instance's bind fail (EADDRINUSE), wedging the
 	// node on the old state on every retry.
 	if s.box != nil {
-		s.stop()
+		s.stopLocked()
 	}
 
 	// The pinned cache-file path lives under ConfigDir; multi-node layouts
@@ -375,41 +375,54 @@ func (s *SingBox) registerTracker(ctx context.Context) {
 func (s *SingBox) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.stop()
+	s.stopLocked()
 }
 
-func (s *SingBox) stop() {
-	if s.box == nil {
+// stopLocked detaches the running box. Listeners close synchronously so the
+// ports are free for a restart or kernel switch; in-flight connections drain
+// and the box closes in the background. The previous version waited up to
+// drainTimeout here, stalling the service main loop (and every WS event) on
+// each restart.
+func (s *SingBox) stopLocked() {
+	box, ctx, cancel, tracker := s.box, s.ctx, s.cancel, s.connTracker
+	if box == nil {
 		return
 	}
 
-	// Step 1: close all listen sockets so no new connections are accepted.
-	// im.Close() sets m.started=false so the subsequent box.Close() call is a no-op
-	// for inbounds (avoids double-close), but box.Close() still tears down routers
-	// and outbounds.
-	if im := service.FromContext[adapter.InboundManager](s.ctx); im != nil {
-		_ = im.Close()
-	}
+	s.box = nil
+	s.ctx = nil
+	s.cancel = nil
+	s.connTracker = nil
+	s.trackerRegistered = false
+	s.inbounds = nil
+	s.users = nil
 
-	// Step 2: wait for in-flight connections to drain naturally (best-effort).
-	if s.connTracker != nil {
-		deadline := time.Now().Add(drainTimeout)
-		for time.Now().Before(deadline) {
-			if s.connTracker.ActiveCount() == 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+	// Step 1: close all listen sockets so no new connections are accepted and
+	// the next instance can bind the same ports.
+	if ctx != nil {
+		if im := service.FromContext[adapter.InboundManager](ctx); im != nil {
+			_ = im.Close()
 		}
 	}
 
-	// Step 3: hard-close everything that is still open.
-	s.box.Close()
-	s.box = nil
-	if s.cancel != nil {
-		s.cancel()
-		s.cancel = nil
-	}
-	s.ctx = nil
+	go func() {
+		// Step 2: wait for in-flight connections to drain naturally
+		// (best-effort), without blocking the caller.
+		if tracker != nil {
+			deadline := time.Now().Add(drainTimeout)
+			for time.Now().Before(deadline) {
+				if tracker.ActiveCount() == 0 {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		// Step 3: hard-close everything that is still open.
+		box.Close()
+		if cancel != nil {
+			cancel()
+		}
+	}()
 }
 
 func (s *SingBox) IsRunning() bool {
