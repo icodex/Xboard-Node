@@ -586,3 +586,39 @@ func TestCertReconfigureGivesUpAfterRetries(t *testing.T) {
 		t.Fatal("certBusy must be false after give-up")
 	}
 }
+
+// A burst of panel deltas must reach the kernel as one full-set update: each
+// per-event apply costs a pass over every user, and the queue is small.
+func TestApplyUserDeltaBatchPreservesOrder(t *testing.T) {
+	k := &fakeKernel{running: true}
+	s := newTestService(k)
+	var applied []model.UserSpec
+	k.onUpdateUsers = func(users []model.UserSpec) {
+		applied = append([]model.UserSpec(nil), users...)
+	}
+	s.lastUsers = []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
+
+	events := []controlplane.Event{
+		{Type: controlplane.EventSyncUserDelta, DeltaAction: "add", DeltaUsers: []model.UserSpec{{ID: 2, UUID: "uuid-2"}}},
+		{Type: controlplane.EventSyncUserDelta, DeltaAction: "add", DeltaUsers: []model.UserSpec{{ID: 3, UUID: "uuid-3"}}},
+		{Type: controlplane.EventSyncUserDelta, DeltaAction: "remove", DeltaUsers: []model.UserSpec{{ID: 2}}},
+	}
+	s.applyUserDeltaBatch(context.Background(), events)
+
+	if k.updateCalls != 1 {
+		t.Fatalf("kernel updates = %d, want 1 merged update", k.updateCalls)
+	}
+	if k.addCalls != 0 || k.removeCalls != 0 {
+		t.Fatalf("batch must apply the merged set, got add=%d remove=%d", k.addCalls, k.removeCalls)
+	}
+	got := map[int]bool{}
+	for _, u := range applied {
+		got[u.ID] = true
+	}
+	if len(applied) != 2 || !got[1] || !got[3] {
+		t.Fatalf("applied set = %+v, want users 1 and 3", applied)
+	}
+	if s.lastUserHash != computeUserHash(applied) {
+		t.Fatal("lastUserHash must match the applied set")
+	}
+}

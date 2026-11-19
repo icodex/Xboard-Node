@@ -323,7 +323,7 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 		x.users = merged
 		x.mu.Unlock()
 		x.updateDispatcherLimits(merged)
-		x.updateBandwidthLimits(merged)
+		x.applyBandwidthLimits(users)
 		return 0, nil
 	}
 
@@ -366,7 +366,9 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 	x.users = merged
 	x.mu.Unlock()
 	x.updateDispatcherLimits(merged)
-	x.updateBandwidthLimits(merged)
+	// Only the users this delta touched need limiter state: a full Reset +
+	// re-Set of every user on each panel event is O(all users) for no gain.
+	x.applyBandwidthLimits(users)
 
 	nlog.Core().Info("xray: users added via UserManager", "added", added, "total", len(merged))
 	if len(failed) > 0 {
@@ -442,7 +444,7 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 	x.users = kept
 	x.mu.Unlock()
 	x.updateDispatcherLimits(kept)
-	x.updateBandwidthLimits(kept)
+	x.clearBandwidthLimits(users)
 
 	nlog.Core().Info("xray: users removed via UserManager", "removed", actualRemoved, "total", len(kept))
 	if len(failed) > 0 {
@@ -834,6 +836,55 @@ func (x *Xray) updateBandwidthLimits(users []model.UserSpec) {
 		bps := int64(u.SpeedLimit) * 1_000_000 / 8
 		bm.SetUserLimit(email, bps)
 	}
+}
+
+// applyBandwidthLimits writes limiter state for the users a delta touched,
+// without resetting the manager's whole table.
+func (x *Xray) applyBandwidthLimits(users []model.UserSpec) {
+	bm, fn := x.bandwidthManager()
+	if bm == nil {
+		return
+	}
+	for _, u := range users {
+		email := userEmail(u.ID)
+		if fn != nil {
+			bm.SetUserLimiter(email, fn(u.UUID))
+			continue
+		}
+		bps := int64(u.SpeedLimit) * 1_000_000 / 8
+		bm.SetUserLimit(email, bps)
+	}
+}
+
+// clearBandwidthLimits drops limiter state for removed users (a nil limiter
+// means unlimited, so the stale bucket is never consulted again).
+func (x *Xray) clearBandwidthLimits(users []model.UserSpec) {
+	bm, _ := x.bandwidthManager()
+	if bm == nil {
+		return
+	}
+	for _, u := range users {
+		bm.SetUserLimiter(userEmail(u.ID), nil)
+	}
+}
+
+func (x *Xray) bandwidthManager() (featurebandwidth.Manager, func(string) *rate.Limiter) {
+	x.mu.Lock()
+	inst := x.instance
+	fn := x.speedLimitFunc
+	x.mu.Unlock()
+	if inst == nil {
+		return nil, nil
+	}
+	feat := inst.GetFeature(featurebandwidth.ManagerType())
+	if feat == nil {
+		return nil, nil
+	}
+	bm, ok := feat.(featurebandwidth.Manager)
+	if !ok {
+		return nil, nil
+	}
+	return bm, fn
 }
 
 // updateDispatcherLimits configures the LimitDispatcher with per-user

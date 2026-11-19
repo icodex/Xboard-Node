@@ -857,10 +857,41 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if len(event.DeltaUsers) == 0 {
 			return
 		}
-		if s.nodeLog != nil {
-			s.nodeLog.Info(fmt.Sprintf("users delta: %s, %d users", event.DeltaAction, len(event.DeltaUsers)))
+		// The panel emits one delta per edited user. Applying each on the main
+		// loop costs a full pass over every user (limiter maps, speed buckets,
+		// user-map rebuild, hash), and a burst overflows wsEvents, which
+		// triggers a full REST resync. Merge the deltas already queued and
+		// apply the resulting set once.
+		batch := []controlplane.Event{event}
+		var following []controlplane.Event
+	drain:
+		for len(batch) < maxQueuedDeltas {
+			select {
+			case next := <-s.wsEvents:
+				if next.Type == controlplane.EventSyncUserDelta && len(next.DeltaUsers) > 0 {
+					batch = append(batch, next)
+					continue
+				}
+				following = append(following, next)
+			default:
+				break drain
+			}
 		}
-		s.applyUserDelta(ctx, event.DeltaAction, event.DeltaUsers)
+		if len(batch) == 1 {
+			if s.nodeLog != nil {
+				s.nodeLog.Info(fmt.Sprintf("users delta: %s, %d users", event.DeltaAction, len(event.DeltaUsers)))
+			}
+			s.applyUserDelta(ctx, event.DeltaAction, event.DeltaUsers)
+		} else {
+			if s.nodeLog != nil {
+				s.nodeLog.Info(fmt.Sprintf("users deltas merged: %d events", len(batch)))
+			}
+			s.applyUserDeltaBatch(ctx, batch)
+		}
+		// Events dequeued behind the batch keep their original order.
+		for _, next := range following {
+			s.handleWSEvent(ctx, next)
+		}
 
 	case controlplane.EventSyncDevices:
 		// Sync global device state
@@ -1199,6 +1230,39 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 	default:
 		nlog.Core().Warn(fmt.Sprintf("unknown user delta action: %s", action))
 	}
+}
+
+// maxQueuedDeltas bounds how many queued user-delta events one batch merge
+// consumes, so a permanently busy queue cannot starve the other channels.
+const maxQueuedDeltas = 64
+
+// applyUserDeltaBatch replays a run of queued add/remove deltas onto the
+// current user set and applies the result once. Per-user add/remove ordering
+// is preserved: a later action for the same user wins.
+func (s *Service) applyUserDeltaBatch(ctx context.Context, events []controlplane.Event) {
+	byID := make(map[int]model.UserSpec, len(s.lastUsers))
+	for _, u := range s.lastUsers {
+		byID[u.ID] = u
+	}
+	for _, event := range events {
+		switch event.DeltaAction {
+		case "add":
+			for _, u := range event.DeltaUsers {
+				byID[u.ID] = u
+			}
+		case "remove":
+			for _, u := range event.DeltaUsers {
+				delete(byID, u.ID)
+			}
+		default:
+			nlog.Core().Warn("unknown user delta action in batch", "action", event.DeltaAction)
+		}
+	}
+	merged := make([]model.UserSpec, 0, len(byID))
+	for _, u := range byID {
+		merged = append(merged, u)
+	}
+	s.applyUserUpdate(ctx, merged, "")
 }
 
 // mergeUsers overlays deltaUsers onto base (keyed by ID). New users are

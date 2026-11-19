@@ -47,6 +47,11 @@ type SingBox struct {
 	nodeConfig *model.NodeSpec
 	tls        kernel.TLSCert
 
+	// inbounds is the parsed inbound option set that matches the running box.
+	// User deltas rewrite its user lists in place (typed options, no config
+	// JSON) instead of rebuilding the whole kernel config.
+	inbounds []option.Inbound
+
 	// connTracker is our lightweight in-process byte/IP tracker.
 	// Created fresh on every Start (full restart).
 	// Survives Reload (hot-swap) since live connections persist.
@@ -170,6 +175,7 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	}
 
 	s.trackerRegistered = false
+	s.inbounds = opts.Inbounds
 	s.registerTracker(ctx)
 
 	nlog.Core().Debug("sing-box started", "users", len(users))
@@ -244,6 +250,7 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 	if err := s.applyInboundUsers(opts, im, router, nopFactory, configChanged); err != nil {
 		return err
 	}
+	s.inbounds = opts.Inbounds
 
 	// Trackers remain registered on the Router (which survives ReloadUsers).
 	// Only update the user map — do NOT re-register or traffic is double-counted.
@@ -484,10 +491,9 @@ func (s *SingBox) AddUsers(users []model.UserSpec) (int, error) {
 	}
 
 	merged := append(append([]model.UserSpec{}, s.users...), toAdd...)
-	if err := s.reloadInboundsLocked(merged); err != nil {
+	if err := s.reloadUsersLocked(merged); err != nil {
 		return 0, err
 	}
-	s.users = merged
 	return len(toAdd), nil
 }
 
@@ -518,10 +524,9 @@ func (s *SingBox) RemoveUsers(users []model.UserSpec) (int, error) {
 		return 0, nil
 	}
 
-	if err := s.reloadInboundsLocked(kept); err != nil {
+	if err := s.reloadUsersLocked(kept); err != nil {
 		return 0, err
 	}
-	s.users = kept
 	return removed, nil
 }
 
@@ -546,10 +551,9 @@ func (s *SingBox) UpdateUsers(users []model.UserSpec) (added, removed int, err e
 		return 0, 0, nil
 	}
 
-	if err = s.reloadInboundsLocked(users); err != nil {
+	if err = s.reloadUsersLocked(users); err != nil {
 		return 0, 0, err
 	}
-	s.users = users
 	return
 }
 
@@ -583,12 +587,66 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 	if err := s.applyInboundUsers(opts, im, router, singLog.NewNOPFactory(), false); err != nil {
 		return err
 	}
+	s.inbounds = opts.Inbounds
 
 	if s.connTracker != nil {
 		s.connTracker.SetUserMap(buildUserMap(users))
 	}
 
 	nlog.Core().Debug("sing-box users hot-swapped", "users", len(users))
+	return nil
+}
+
+// reloadUsersLocked applies a user-set change without rebuilding the kernel
+// config. The parsed inbound options are already in memory, so only the users
+// slices are rewritten and handed to UpdatableInbound.UpdateUsers; the old
+// path re-ran buildConfig, marshalled the whole config to JSON and parsed it
+// back on every single panel delta, doing O(total users) work per event.
+//
+// Must be called with s.mu held.
+func (s *SingBox) reloadUsersLocked(users []model.UserSpec) error {
+	if s.ctx == nil {
+		return fmt.Errorf("not running")
+	}
+	im := service.FromContext[adapter.InboundManager](s.ctx)
+	if im == nil {
+		return fmt.Errorf("inbound manager not available")
+	}
+	router := service.FromContext[adapter.Router](s.ctx)
+	if router == nil {
+		return fmt.Errorf("router not available")
+	}
+
+	next := make([]option.Inbound, len(s.inbounds))
+	nopFactory := singLog.NewNOPFactory()
+	for i, inb := range s.inbounds {
+		updated, ok := inboundWithUsers(inb, s.nodeConfig, users)
+		if !ok {
+			// No typed mapping for this inbound type (hysteria v1 today):
+			// rebuild from config instead of silently keeping stale users.
+			nlog.Core().Debug("typed user update unavailable, rebuilding config", "inbound", inb.Tag, "type", inb.Type)
+			return s.reloadInboundsLocked(users)
+		}
+		next[i] = updated
+
+		if existing, ok := im.Get(inb.Tag); ok && existing.Type() == inb.Type && tryUpdateInboundUsers(existing, updated) {
+			continue
+		}
+		// Not updatable in place (or the tag is new): recreate the listener
+		// with the options already parsed, no config JSON involved.
+		_ = im.Remove(inb.Tag)
+		logger := nopFactory.NewLogger(fmt.Sprintf("inbound/%s[%s]", inb.Type, inb.Tag))
+		if err := im.Create(s.ctx, router, logger, inb.Tag, inb.Type, updated.Options); err != nil {
+			return fmt.Errorf("recreate inbound %s: %w", inb.Tag, err)
+		}
+	}
+
+	s.inbounds = next
+	s.users = users
+	if s.connTracker != nil {
+		s.connTracker.SetUserMap(buildUserMap(users))
+	}
+	nlog.Core().Debug("sing-box users updated in place", "users", len(users))
 	return nil
 }
 

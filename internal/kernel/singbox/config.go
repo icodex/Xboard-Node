@@ -528,6 +528,14 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	return base
 }
 
+// ss2022Password renders a Shadowsocks 2022 user key the way sing-box expects:
+// base64 of the first Size bytes of the panel UUID string.
+func ss2022Password(size int, uuid string) string {
+	key := make([]byte, size)
+	copy(key, uuid)
+	return base64.StdEncoding.EncodeToString(key)
+}
+
 func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	base["type"] = "shadowsocks"
 	base["method"] = nc.Cipher
@@ -548,27 +556,16 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	}
 
 	userList := make([]M, len(users))
-	var rawBuf []byte
-	if isSS2022 {
-		rawBuf = make([]byte, ss2022.Size)
-	}
-
 	for i := range users {
 		u := &users[i]
-		user := M{
-			"name":     u.UUID,
-			"password": u.UUID,
-		}
-
+		ssPassword := u.UUID
 		if isSS2022 {
-			// Reuse buffer and clear it to maintain SS2022 key integrity
-			for j := range rawBuf {
-				rawBuf[j] = 0
-			}
-			copy(rawBuf, u.UUID)
-			user["password"] = base64.StdEncoding.EncodeToString(rawBuf)
+			ssPassword = ss2022Password(ss2022.Size, u.UUID)
 		}
-		userList[i] = user
+		userList[i] = M{
+			"name":     u.UUID,
+			"password": ssPassword,
+		}
 	}
 	base["users"] = userList
 
