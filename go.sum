@@ -468,8 +468,8 @@ github.com/icodex/Xray-core v0.0.0-20261030205927-7b202337d0c5 h1:ffefTJfXuc0Dl9
 github.com/icodex/Xray-core v0.0.0-20261030205927-7b202337d0c5/go.mod h1:KIcZgnrQ/NPDMbR9sDy2wB/aT/g7AF4gcIUrzl8yj7E=
 github.com/icodex/reality v0.0.0-20261031020313-971a56a09452 h1:yMVKlxirt4flGNOTPqJs+60Yl774K0payNyuOCgdeXc=
 github.com/icodex/reality v0.0.0-20261031020313-971a56a09452/go.mod h1:ptlSkJ8k/7IDauNH0SA96JPOo+nYGLTv2Y3UMpwvAsY=
-github.com/icodex/sing-box v1.14.1-0.20261105153803-0a0a303dc0ac h1:cpH9UEDNQ1X00u9hJMU1UFjMZwJ0NkME/CRwrPb0XUE=
-github.com/icodex/sing-box v1.14.1-0.20261105153803-0a0a303dc0ac/go.mod h1:1mwbxXOYk2yXjc5WmOOK8k9hFaTc335RRiStMf7JIxU=
+github.com/icodex/sing-box v1.14.1-0.20261119093143-107a657c9fcf h1:kHFV5yaU3/ifVJrZVxbLa3JITkZq8I+C12PCvkueEsw=
+github.com/icodex/sing-box v1.14.1-0.20261119093143-107a657c9fcf/go.mod h1:1mwbxXOYk2yXjc5WmOOK8k9hFaTc335RRiStMf7JIxU=
 github.com/inconshreveable/mousetrap v1.0.0/go.mod h1:PxqpIevigyE2G7u3NXJIT2ANytuPF1OarO4DADm73n8=
 github.com/insomniacslk/dhcp v0.0.0-20260220084031-5adc3eb26f91 h1:u9i04mGE3iliBh0EFuWaKsmcwrLacqGmq1G3XoaM7gY=
 github.com/insomniacslk/dhcp v0.0.0-20260220084031-5adc3eb26f91/go.mod h1:qfvBmyDNp+/liLEYWRvqny/PEz9hGe2Dz833eXILSmo=
