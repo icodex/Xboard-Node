@@ -19,6 +19,7 @@ func TestNodeSpecFromPanelValidated_AllowsTargetsFromCustomConfigOutbounds(t *te
 
 	_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 		Protocol:   "shadowsocks",
+		Cipher:     "aes-256-gcm",
 		ServerPort: 8388,
 		CustomOutbounds: []panel.OutboundConfig{{
 			Tag:      "proxy",
@@ -45,6 +46,7 @@ func TestNodeSpecFromPanelValidated_RejectsDuplicateTagsAcrossSources(t *testing
 
 	_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 		Protocol:   "shadowsocks",
+		Cipher:     "aes-256-gcm",
 		ServerPort: 8388,
 		CustomOutbounds: []panel.OutboundConfig{{
 			Tag:      "warp",

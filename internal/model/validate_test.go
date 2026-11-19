@@ -116,7 +116,7 @@ func TestResolveKernelForNode_ExplicitKernel(t *testing.T) {
 
 func TestValidateNodeSpec_SS2022ChachaRejected(t *testing.T) {
 	for _, cipher := range []string{"2022-blake3-chacha20-poly1305", "2022-blake3-chacha12-poly1305", "2022-Blake3-Chacha8-Poly1305"} {
-		err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: cipher}, config.KernelConfig{Type: "singbox"})
+		err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: cipher}, config.KernelConfig{Type: "singbox"})
 		if err == nil {
 			t.Errorf("cipher %q: expected rejection, got nil", cipher)
 			continue
@@ -126,7 +126,7 @@ func TestValidateNodeSpec_SS2022ChachaRejected(t *testing.T) {
 		}
 	}
 	for _, cipher := range []string{"2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "aes-256-gcm"} {
-		if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: cipher}, config.KernelConfig{Type: "singbox"}); err != nil {
+		if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: cipher}, config.KernelConfig{Type: "singbox"}); err != nil {
 			t.Errorf("cipher %q: unexpected error %v", cipher, err)
 		}
 	}
@@ -136,7 +136,7 @@ func TestValidateNodeSpec_XrayShadowsocksCipher(t *testing.T) {
 	// The 146 SS-aes-192-gcm-xray node: panel dispatched kernel_type=xray with
 	// a cipher the pinned xray fork cannot parse; the node must refuse it
 	// before starting the kernel.
-	spec := &NodeSpec{Protocol: "shadowsocks", Cipher: "aes-192-gcm"}
+	spec := &NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: "aes-192-gcm"}
 
 	err := ValidateNodeSpec(spec, config.KernelConfig{Type: "xray"})
 	if err == nil {
@@ -155,16 +155,16 @@ func TestValidateNodeSpec_XrayShadowsocksCipher(t *testing.T) {
 	}
 
 	// auto resolves to xray when the panel pins kernel_type=xray.
-	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-192-gcm", KernelType: "xray"}, config.KernelConfig{Type: "auto"}); err == nil || !contains(err.Error(), "not supported by xray") {
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: "aes-192-gcm", KernelType: "xray"}, config.KernelConfig{Type: "auto"}); err == nil || !contains(err.Error(), "not supported by xray") {
 		t.Errorf("auto + panel kernel_type=xray: want rejection, got %v", err)
 	}
 
-	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "xray"}); err != nil {
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "xray"}); err != nil {
 		t.Errorf("xray + aes-256-gcm: unexpected error %v", err)
 	}
 
 	for _, cipher := range []string{"", "   "} {
-		err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: cipher}, config.KernelConfig{Type: "xray"})
+		err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: cipher}, config.KernelConfig{Type: "xray"})
 		if err == nil || !contains(err.Error(), "not supported by xray") {
 			t.Errorf("xray + cipher %q: want rejection, got %v", cipher, err)
 		}
@@ -172,20 +172,20 @@ func TestValidateNodeSpec_XrayShadowsocksCipher(t *testing.T) {
 }
 
 func TestValidateNodeSpec_SSPluginRejected(t *testing.T) {
-	err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm", Plugin: "simple-obfs", PluginOpt: "obfs=http"}, config.KernelConfig{Type: "singbox"})
+	err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: "aes-256-gcm", Plugin: "simple-obfs", PluginOpt: "obfs=http"}, config.KernelConfig{Type: "singbox"})
 	if err == nil {
 		t.Fatal("expected rejection, got nil")
 	}
 	if !contains(err.Error(), "SIP003") {
 		t.Errorf("error should mention SIP003 plugins, got %q", err.Error())
 	}
-	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "singbox"}); err != nil {
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "shadowsocks", ServerPort: 1, Cipher: "aes-256-gcm"}, config.KernelConfig{Type: "singbox"}); err != nil {
 		t.Errorf("no plugin: unexpected error %v", err)
 	}
 }
 
 func TestValidateNodeSpec_HysteriaPolicy(t *testing.T) {
-	base := &NodeSpec{Protocol: "hysteria", Version: 2}
+	base := &NodeSpec{Protocol: "hysteria", Version: 2, ServerPort: 8443}
 
 	for _, profile := range []string{"standard", "conservative", "aggressive", ""} {
 		spec := *base

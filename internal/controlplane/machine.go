@@ -80,7 +80,7 @@ func (p *MachinePanelControlPlane) Initial(
 	if err != nil {
 		return Bootstrap{}, fmt.Errorf("machine initial config normalize: %w", err)
 	}
-	bootstrap.Users = model.UserSpecsFromPanel(users)
+	bootstrap.Users = model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(bootstrap.Config.Protocol))
 
 	// Register mailbox access after the initial snapshot is prepared, so the
 	// Service can start the kernel immediately and only then drain coalesced WS
@@ -113,7 +113,10 @@ func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("machine poll normalize: %w", err)
 	}
-	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users)}, nil
+	return Snapshot{
+		Config: nodeSpec,
+		Users:  model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(nodeSpec.Protocol)),
+	}, nil
 }
 
 func (p *MachinePanelControlPlane) Discover(

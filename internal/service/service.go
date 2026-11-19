@@ -800,6 +800,15 @@ func (s *Service) drainMachineMailbox(ctx context.Context) {
 	}
 }
 
+// userProtocolRequiresUUID reports whether the current node config validates
+// user UUIDs as UUIDs.
+func (s *Service) userProtocolRequiresUUID() bool {
+	if s.lastConfig == nil {
+		return false
+	}
+	return model.ProtocolRequiresUUID(s.lastConfig.Protocol)
+}
+
 func (s *Service) requestWSResync(ctx context.Context, reason string) {
 	// Every request advances the generation: a poll that was already in
 	// flight when this request arrived does not cover it, so it must not
@@ -956,6 +965,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if event.Users == nil {
 			return
 		}
+		event.Users = model.SanitizeUserSpecs(event.Users, s.userProtocolRequiresUUID())
 		newHash := computeUserHash(event.Users)
 		if newHash == s.lastUserHash {
 			return
@@ -973,6 +983,11 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if len(event.DeltaUsers) == 0 {
 			return
 		}
+		requireUUID := s.userProtocolRequiresUUID()
+		event.DeltaUsers = model.SanitizeUserDeltas(event.DeltaUsers, event.DeltaAction, requireUUID)
+		if len(event.DeltaUsers) == 0 {
+			return
+		}
 		s.stateSeq.Add(1)
 		// The panel emits one delta per edited user. Applying each on the main
 		// loop costs a full pass over every user (limiter maps, speed buckets,
@@ -986,6 +1001,10 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			select {
 			case next := <-s.wsEvents:
 				if next.Type == controlplane.EventSyncUserDelta && len(next.DeltaUsers) > 0 {
+					next.DeltaUsers = model.SanitizeUserDeltas(next.DeltaUsers, next.DeltaAction, requireUUID)
+					if len(next.DeltaUsers) == 0 {
+						continue
+					}
 					batch = append(batch, next)
 					continue
 				}

@@ -74,7 +74,7 @@ func (p *PanelControlPlane) Initial(ctx context.Context, metricsFn func() map[st
 	if err != nil {
 		return Bootstrap{}, fmt.Errorf("initial config normalize: %w", err)
 	}
-	bootstrap.Users = model.UserSpecsFromPanel(users)
+	bootstrap.Users = model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(bootstrap.Config.Protocol))
 	return bootstrap, nil
 }
 
@@ -111,7 +111,10 @@ func (p *PanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("poll config normalize: %w", err)
 	}
-	return Snapshot{Config: nodeSpec, Users: model.UserSpecsFromPanel(users)}, nil
+	return Snapshot{
+		Config: nodeSpec,
+		Users:  model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(nodeSpec.Protocol)),
+	}, nil
 }
 
 func (p *PanelControlPlane) Discover(ctx context.Context, metricsFn func() map[string]interface{}, events chan<- Event, statuses chan<- StatusChange) (PushClient, error) {

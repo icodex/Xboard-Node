@@ -112,7 +112,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		})
 	}
 
-	return &NodeSpec{
+	spec := &NodeSpec{
 		Protocol:                nc.Protocol,
 		ListenIP:                nc.ListenIP,
 		ServerPort:              nc.ServerPort,
@@ -158,6 +158,16 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		Multiplex:               multiplex,
 		AcceptProxyProtocol:     nc.AcceptProxyProtocol,
 	}
+
+	// The panel sometimes names the protocol after the kernel's inbound type.
+	// Normalize so the advertised protocol list and the builders agree.
+	if strings.EqualFold(strings.TrimSpace(spec.Protocol), "hysteria2") {
+		spec.Protocol = "hysteria"
+		if spec.Version < 2 {
+			spec.Version = 2
+		}
+	}
+	return spec
 }
 
 func NodeSpecFromPanelValidated(nc *panel.NodeConfig, kcfg config.KernelConfig) (*NodeSpec, error) {

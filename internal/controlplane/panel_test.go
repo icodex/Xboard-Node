@@ -12,7 +12,7 @@ import (
 )
 
 func TestPanelControlPlaneInitialRejectsInvalidCustomOutbounds(t *testing.T) {
-	server := newPanelTestServer(`{"protocol":"shadowsocks","server_port":8388,"custom_outbounds":[{"tag":"proxy","protocol":"socks","proxy_tag":"missing","settings":{"server":"2.2.2.2","server_port":1080}}]}`)
+	server := newPanelTestServer(`{"protocol":"shadowsocks","server_port":8388,"cipher":"aes-256-gcm","custom_outbounds":[{"tag":"proxy","protocol":"socks","proxy_tag":"missing","settings":{"server":"2.2.2.2","server_port":1080}}]}`)
 	defer server.Close()
 
 	cp := NewPanelControlPlane(config.PanelConfig{URL: server.URL, Token: "token", NodeID: 1}, config.WSConfig{}, config.KernelConfig{Type: "singbox"})
@@ -26,7 +26,7 @@ func TestPanelControlPlaneInitialRejectsInvalidCustomOutbounds(t *testing.T) {
 }
 
 func TestPanelControlPlanePollRejectsInvalidCustomOutbounds(t *testing.T) {
-	server := newPanelTestServer(`{"protocol":"shadowsocks","server_port":8388,"custom_outbounds":[{"tag":"proxy","protocol":"socks","proxy_tag":"missing","settings":{"server":"2.2.2.2","server_port":1080}}]}`)
+	server := newPanelTestServer(`{"protocol":"shadowsocks","server_port":8388,"cipher":"aes-256-gcm","custom_outbounds":[{"tag":"proxy","protocol":"socks","proxy_tag":"missing","settings":{"server":"2.2.2.2","server_port":1080}}]}`)
 	defer server.Close()
 
 	cp := NewPanelControlPlane(config.PanelConfig{URL: server.URL, Token: "token", NodeID: 1}, config.WSConfig{}, config.KernelConfig{Type: "singbox"})
@@ -45,6 +45,7 @@ func TestTranslateWSEventRejectsInvalidCustomOutbounds(t *testing.T) {
 		Config: &panelapi.NodeConfig{
 			Protocol:   "shadowsocks",
 			ServerPort: 8388,
+			Cipher:     "aes-256-gcm",
 			CustomOutbounds: []panelapi.OutboundConfig{
 				{Tag: "proxy", Protocol: "socks", ProxyTag: "missing", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080}},
 			},

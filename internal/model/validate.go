@@ -27,6 +27,20 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		kernelType = ResolveKernelForNode(n, kcfg)
 	}
 
+	// Values that make the kernel reject the whole config must fail here with
+	// an actionable panel-side error instead of a retry loop.
+	if n.ServerPort < 1 || n.ServerPort > 65535 {
+		return fmt.Errorf("server_port must be between 1 and 65535, got %d", n.ServerPort)
+	}
+	if ip := strings.TrimSpace(n.ListenIP); ip != "" && ip != "0.0.0.0" && ip != "::" {
+		if _, err := netip.ParseAddr(ip); err != nil {
+			return fmt.Errorf("listen_ip %q is not a valid IP address", n.ListenIP)
+		}
+	}
+	if n.TLS < 0 || n.TLS > 2 {
+		return fmt.Errorf("tls must be 0 (off), 1 (tls) or 2 (reality), got %d", n.TLS)
+	}
+
 	if c := strings.ToLower(strings.TrimSpace(n.Cipher)); strings.HasPrefix(c, "2022-blake3-chacha") {
 		return fmt.Errorf("cipher %q cannot serve multiple users: SIP022 identity headers (EIH) are AES-only; use a 2022-blake3-aes-*-gcm cipher", n.Cipher)
 	}
@@ -35,11 +49,24 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	// (plus the shadowsocks_2022 ones); anything else resolves to
 	// CipherType_UNKNOWN and the kernel dies at config parse. Reject up front
 	// so the panel gets an actionable error instead of a retry loop.
-	if kernelType == "xray" && n.Protocol == "shadowsocks" {
+	if n.Protocol == "shadowsocks" {
 		cipher := strings.ToLower(strings.TrimSpace(n.Cipher))
-		if !xrayShadowsocksCiphers[cipher] {
-			return fmt.Errorf("cipher %q is not supported by xray kernel: use aes-128-gcm/aes-256-gcm/chacha20-ietf-poly1305/xchacha20-ietf-poly1305/2022-blake3-aes-*-gcm, or switch kernel to singbox/auto", n.Cipher)
+		switch kernelType {
+		case "xray":
+			if !xrayShadowsocksCiphers[cipher] {
+				return fmt.Errorf("cipher %q is not supported by xray kernel: use aes-128-gcm/aes-256-gcm/chacha20-ietf-poly1305/xchacha20-ietf-poly1305/2022-blake3-aes-*-gcm, or switch kernel to singbox/auto", n.Cipher)
+			}
+		case "singbox":
+			if !singboxShadowsocksCiphers[cipher] {
+				return fmt.Errorf("cipher %q is not supported by sing-box kernel: use aes-128-gcm/aes-256-gcm/chacha20-ietf-poly1305/xchacha20-ietf-poly1305/2022-blake3-aes-*-gcm", n.Cipher)
+			}
 		}
+	}
+
+	// The xray builder only implements hysteria v2; accepting v1 would make it
+	// produce no inbound and wedged the node in the start-retry loop.
+	if kernelType == "xray" && n.Protocol == "hysteria" && n.Version != 2 {
+		return fmt.Errorf("xray kernel only supports hysteria v2: set version=2 or switch kernel to singbox")
 	}
 
 	// Neither kernel implements SIP003 plugins; serving such a node would run
@@ -84,6 +111,16 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 // fork can serve: infra/conf/shadowsocks.go cipherFromString (AEAD) plus
 // proxy/shadowsocks_2022 methods. 2022-blake3-chacha is excluded upstream for
 // multi-user (see the SIP022 check in ValidateNodeSpec).
+var singboxShadowsocksCiphers = map[string]bool{
+	"aes-128-gcm":             true,
+	"aes-192-gcm":             true,
+	"aes-256-gcm":             true,
+	"chacha20-ietf-poly1305":  true,
+	"xchacha20-ietf-poly1305": true,
+	"2022-blake3-aes-128-gcm": true,
+	"2022-blake3-aes-256-gcm": true,
+}
+
 var xrayShadowsocksCiphers = map[string]bool{
 	"aes-128-gcm":             true,
 	"aes-256-gcm":             true,

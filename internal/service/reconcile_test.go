@@ -243,3 +243,44 @@ func TestApplyPullResultRejectsInvalidConfigButAppliesUsers(t *testing.T) {
 		t.Fatalf("users not applied: %v hash=%q want %q", svc.lastUsers, svc.lastUserHash, hash)
 	}
 }
+
+// A single invalid user must not reach the kernel (it rejects the whole
+// config); the valid remainder still applies.
+func TestHandleWSEventDropsInvalidUsers(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	svc.handleWSEvent(context.Background(), controlplane.Event{
+		Type: controlplane.EventSyncUsers,
+		Users: []model.UserSpec{
+			{ID: 1, UUID: ""},
+			{ID: 2, UUID: "u2"},
+			{ID: 0, UUID: "u0"},
+		},
+	})
+	if len(svc.lastUsers) != 1 || svc.lastUsers[0].ID != 2 {
+		t.Fatalf("lastUsers = %v, want only user 2", svc.lastUsers)
+	}
+}
+
+// The poll path drops a config identical to the applied one before it reaches
+// the main loop.
+func TestPullSkipsUnchangedConfig(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	svc.pullResults = make(chan pullResult, 1)
+
+	spec := &model.NodeSpec{Protocol: "vless", ServerPort: 443}
+	svc.lastConfigHash = computeConfigHash(spec)
+	users := []model.UserSpec{{ID: 1, UUID: "u1"}}
+	svc.source = &fakeSource{pollFn: func(context.Context) (controlplane.Snapshot, error) {
+		return controlplane.Snapshot{Config: spec, Users: users}, nil
+	}}
+
+	svc.pullViaAPIAsync(context.Background())
+	result := takePullResult(t, svc)
+
+	if result.config != nil {
+		t.Fatal("unchanged config must be dropped by the poll")
+	}
+	if len(result.users) != 1 || result.userHash == "" {
+		t.Fatalf("users/hash missing: %v %q", result.users, result.userHash)
+	}
+}

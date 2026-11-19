@@ -81,7 +81,7 @@ func (s *SingBox) Name() string { return "sing-box" }
 func (s *SingBox) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
-		"hysteria", "hysteria2", "tuic", "naive", "socks", "http", "anytls", "mieru",
+		"hysteria", "tuic", "naive", "socks", "http", "anytls", "mieru",
 	}
 }
 

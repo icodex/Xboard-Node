@@ -12,6 +12,7 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 	t.Run("valid custom outbounds and route targets", func(t *testing.T) {
 		node, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 			Protocol:   "shadowsocks",
+			Cipher:     "aes-256-gcm",
 			ServerPort: 8388,
 			CustomOutbounds: []panel.OutboundConfig{
 				{Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk", "peer_public_key": "peer"}},
@@ -33,6 +34,7 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 	t.Run("invalid custom outbounds", func(t *testing.T) {
 		_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 			Protocol:   "shadowsocks",
+			Cipher:     "aes-256-gcm",
 			ServerPort: 8388,
 			CustomOutbounds: []panel.OutboundConfig{{
 				Tag: "proxy", Protocol: "socks", ProxyTag: "missing", Settings: map[string]any{"server": "2.2.2.2", "server_port": 1080},
@@ -66,6 +68,7 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 	t.Run("reject unknown route target", func(t *testing.T) {
 		_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
 			Protocol:   "shadowsocks",
+			Cipher:     "aes-256-gcm",
 			ServerPort: 8388,
 			CustomOutbounds: []panel.OutboundConfig{{
 				Tag: "warp", Protocol: "wireguard", Settings: map[string]any{"server": "1.1.1.1", "server_port": 2408, "private_key": "pk", "peer_public_key": "peer"},
