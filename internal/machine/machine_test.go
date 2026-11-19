@@ -302,9 +302,10 @@ type fakeWSSender struct {
 }
 
 func (f *fakeWSSender) IsConnected() bool { return f.connected }
-func (f *fakeWSSender) SendRaw(event string, data json.RawMessage) {
+func (f *fakeWSSender) SendRaw(event string, data json.RawMessage) bool {
 	f.events = append(f.events, event)
 	f.payloads = append(f.payloads, data)
+	return true
 }
 
 // Nodes started before the machine handshake used to capture a nil WS client
@@ -317,14 +318,18 @@ func TestMachineNodePushLateBindsSharedWS(t *testing.T) {
 	if push.IsConnected() {
 		t.Fatal("adapter without a sender must report disconnected")
 	}
-	push.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}}) // must be a no-op
+	if push.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}}) {
+		t.Fatal("a disconnected adapter must report not delivered")
+	}
 
 	sender := &fakeWSSender{connected: true}
 	current = sender
 	if !push.IsConnected() {
 		t.Fatal("adapter must follow the shared WS once it appears")
 	}
-	push.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}})
+	if !push.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}}) {
+		t.Fatal("a connected adapter must report delivered")
+	}
 	if len(sender.events) != 1 || sender.events[0] != panel.WSEventReportDevices {
 		t.Fatalf("events = %v, want one %q", sender.events, panel.WSEventReportDevices)
 	}
@@ -340,7 +345,9 @@ func TestMachineNodePushLateBindsSharedWS(t *testing.T) {
 	}
 
 	sender.connected = false
-	push.SendDeviceReport(map[int][]string{1: {"2.2.2.2"}})
+	if push.SendDeviceReport(map[int][]string{1: {"2.2.2.2"}}) {
+		t.Fatal("a disconnected sender must report not delivered")
+	}
 	if len(sender.events) != 1 {
 		t.Fatalf("disconnected sender must not deliver: %v", sender.events)
 	}

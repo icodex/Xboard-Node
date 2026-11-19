@@ -645,3 +645,32 @@ func TestNewWSClientNormalizesInvalidTimings(t *testing.T) {
 		t.Fatalf("negative timings not normalized: %+v", ws.cfg)
 	}
 }
+
+// The device reporter must know whether the frame was enqueued, otherwise the
+// service cannot retry a dropped snapshot.
+func TestWSClient_DeviceReportReturnsDelivery(t *testing.T) {
+	server := fakeWSServer(t, nil)
+	defer server.Close()
+
+	ws := NewWSClient("ws://"+strings.TrimPrefix(server.URL, "http://"), "t", 1,
+		WSClientConfig{}, func(WSEvent) {}, nil, nil)
+
+	if ws.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}}) {
+		t.Fatal("disconnected client must report not delivered")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go ws.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !ws.IsConnected() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ws.IsConnected() {
+		t.Fatal("client did not connect")
+	}
+	if !ws.SendDeviceReport(map[int][]string{1: {"1.1.1.1"}}) {
+		t.Fatal("connected client must report the frame as enqueued")
+	}
+}

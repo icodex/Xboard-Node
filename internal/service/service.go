@@ -1642,7 +1642,14 @@ func (s *Service) sendDeviceBatch() {
 		nlog.Core().Debug("device snapshot unchanged, skipping")
 		return
 	}
-	s.sink.ReportDevices(s.wsClient, devices)
+	if !s.sink.ReportDevices(s.wsClient, devices) {
+		// FlushAliveIPs already advanced the tracker cursor; without this the
+		// snapshot would be lost when the write channel was full or the link
+		// dropped between the IsConnected check and the enqueue.
+		s.tracker.MarkAliveIPsStale()
+		nlog.Core().Debug("device snapshot not delivered, will retry", "users", len(devices))
+		return
+	}
 	nlog.Core().Debug("device snapshot sent", "users", len(devices))
 }
 

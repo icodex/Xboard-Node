@@ -621,15 +621,15 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 }
 
 // SendDeviceReport sends local device snapshot to panel via WS.
-func (w *WSClient) SendDeviceReport(devices map[int][]string) {
-	w.SendDeviceReportForNode(0, devices)
+func (w *WSClient) SendDeviceReport(devices map[int][]string) bool {
+	return w.SendDeviceReportForNode(0, devices)
 }
 
 // SendDeviceReportForNode sends a device report tagged with a specific node_id.
 // nodeID == 0 omits the field (legacy single-node mode).
-func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string) {
+func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string) bool {
 	if !w.connected.Load() {
-		return
+		return false
 	}
 
 	var payload interface{}
@@ -641,7 +641,7 @@ func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string)
 
 	d, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return false
 	}
 	msg := wsMessage{
 		Event:     WSEventReportDevices,
@@ -649,13 +649,13 @@ func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string)
 		Timestamp: time.Now().Unix(),
 	}
 
-	w.trySend(msg, "device report")
+	return w.trySend(msg, "device report")
 }
 
 // SendRaw sends a raw message to the panel via WebSocket.
-func (w *WSClient) SendRaw(event string, data json.RawMessage) {
+func (w *WSClient) SendRaw(event string, data json.RawMessage) bool {
 	if !w.connected.Load() {
-		return
+		return false
 	}
 
 	msg := wsMessage{
@@ -664,19 +664,21 @@ func (w *WSClient) SendRaw(event string, data json.RawMessage) {
 		Timestamp: time.Now().Unix(),
 	}
 
-	w.trySend(msg, "raw message")
+	return w.trySend(msg, "raw message")
 }
 
 // trySend enqueues msg on the current connection's write channel. Safe to call
 // from any goroutine, including while connect() is swapping the channel.
-func (w *WSClient) trySend(msg wsMessage, what string) {
+func (w *WSClient) trySend(msg wsMessage, what string) bool {
 	ch := w.writeCh.Load()
 	if ch == nil {
-		return
+		return false
 	}
 	select {
 	case *ch <- msg:
+		return true
 	default:
 		nlog.Core().Warn("ws write channel full, skipping "+what, "event", msg.Event)
+		return false
 	}
 }

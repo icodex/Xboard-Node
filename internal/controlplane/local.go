@@ -55,7 +55,8 @@ func (l *LocalControlPlane) Discover(ctx context.Context, _ func() map[string]in
 }
 
 func (l *LocalControlPlane) Report(payload ReportPayload) error { _ = payload; return nil }
-func (l *LocalControlPlane) ReportDevices(push PushClient, devices map[int][]string) {
+func (l *LocalControlPlane) ReportDevices(push PushClient, devices map[int][]string) bool {
 	_, _ = push, devices
+	return false
 }
 func (l *LocalControlPlane) Metrics() APIMetrics { return APIMetrics{} }

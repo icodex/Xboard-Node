@@ -437,7 +437,7 @@ func (o *Orchestrator) applyIntervals(bc panel.MachineBaseConfig) {
 // wsSender is the subset of the shared WS client this adapter needs.
 type wsSender interface {
 	IsConnected() bool
-	SendRaw(event string, data json.RawMessage)
+	SendRaw(event string, data json.RawMessage) bool
 }
 
 var _ wsSender = (*panel.WSClient)(nil)
@@ -473,10 +473,10 @@ func (p *machineNodePush) IsConnected() bool {
 	return s != nil && s.IsConnected()
 }
 
-func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {
+func (p *machineNodePush) SendDeviceReport(devices map[int][]string) bool {
 	s := p.sender()
 	if s == nil || !s.IsConnected() {
-		return
+		return false
 	}
 	payload := map[string]interface{}{
 		"node_id": p.nodeID,
@@ -488,5 +488,5 @@ func (p *machineNodePush) SendDeviceReport(devices map[int][]string) {
 	}
 	payload["devices"] = strDevices
 	data, _ := json.Marshal(payload)
-	s.SendRaw(panel.WSEventReportDevices, data)
+	return s.SendRaw(panel.WSEventReportDevices, data)
 }
