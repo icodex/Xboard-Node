@@ -561,6 +561,16 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 			return magic, nil
 		},
 	})
+	// NewCache starts its maintenance goroutine immediately. Until the state
+	// transfer below succeeds, every failure path must stop it: ObtainCertSync
+	// failures are retried by the service and would otherwise leak one cache
+	// (and its locks) per attempt.
+	cacheOwned := false
+	defer func() {
+		if !cacheOwned {
+			cache.Stop()
+		}
+	}()
 
 	magic = certmagic.New(cache, certmagic.Config{
 		Storage: storage,
@@ -637,6 +647,7 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 	m.acmeFingerprint = acmeFingerprint(m.cfg)
 	m.acmeStarted = true
 	m.cache = cache
+	cacheOwned = true
 	m.acmeMu.Unlock()
 	return nil
 }
