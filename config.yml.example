@@ -127,11 +127,18 @@ log:
 # One panel binding, several node IDs in one process. When `nodes:` is present,
 # panel.node_id is ignored. All entries share panel URL/token and kernel type;
 # per-entry overrides below. Each node gets its own config_dir/node-<id> state.
+#
+# One panel node = ONE protocol + port: a node runs a single inbound, and
+# kernel config files cannot add extra inbounds (custom_config "inbounds" is
+# ignored). To serve several protocols from this machine, create one node per
+# protocol on the panel (each with its own port) and list every node_id here,
+# or use machine mode below. `kernel.type: "auto"` picks the kernel per node
+# protocol/transport.
 # ══════════════════════════════════════════════════════════════════════════════
 # nodes:
-#   - node_id: 1
+#   - node_id: 1                # panel node 1, e.g. vless + reality :443
 #
-#   - node_id: 2
+#   - node_id: 2                # panel node 2, e.g. hysteria2 :8443 (own cert)
 #     node_type: ""                # optional
 #     kernel:                      # optional per-node subset override
 #       config_dir: "/etc/xboard-node/node-2"
