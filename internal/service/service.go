@@ -121,13 +121,15 @@ type Service struct {
 	certCtx    context.Context
 	certCancel context.CancelFunc
 
-	// pushInFlight counts async report goroutines. Shutdown waits for them
-	// (bounded) and skips failure restores into a tracker that is going away.
+	// pushInFlight counts async report goroutines. The shutdown branch waits
+	// for them (bounded) before the final snapshot, so a failed report has
+	// already restored its traffic into the tracker by then.
 	pushInFlight atomic.Int32
-	shuttingDown atomic.Bool
 
-	// shutdownWait bounds the worker waits above; tests lower it.
-	shutdownWait time.Duration
+	// Shutdown budgets; tests lower them.
+	shutdownWait    time.Duration // join cert workers
+	pushWait        time.Duration // drain in-flight async reports
+	finalReportWait time.Duration // bound the final synchronous report
 }
 
 // certUpdate carries an applied certificate configuration back to the main
@@ -317,13 +319,13 @@ func (s *Service) kernelRunning() bool {
 	return k != nil && k.IsRunning()
 }
 
-// shutdownWorkers cancels certificate reconfiguration and waits (bounded) for
-// workers and async reports to finish before cert.Stop. The bound matters:
-// ACME issuance can ignore cancellation for a while, and the daemon only
-// allows a short shutdown budget. The manager refuses reconfiguration once
-// stopped, so a straggler cannot re-arm maintenance.
+// shutdownWorkers cancels certificate reconfiguration and the WS client, then
+// joins cert workers and in-flight reports with independent bounds before
+// cert.Stop runs. The bounds matter: ACME issuance can ignore cancellation for
+// a while, and the daemon only allows a short shutdown budget. The manager
+// refuses reconfiguration once stopped, so a straggler cannot re-arm
+// maintenance.
 func (s *Service) shutdownWorkers() {
-	s.shuttingDown.Store(true)
 	if s.certCancel != nil {
 		s.certCancel()
 	}
@@ -332,12 +334,22 @@ func (s *Service) shutdownWorkers() {
 	if s.wsCancel != nil {
 		s.wsCancel()
 	}
-	wait := s.shutdownWait
-	if wait <= 0 {
-		wait = 5 * time.Second
+	waitCount(s.certWorkers.Load, s.shutdownWait, 3*time.Second)
+	waitCount(s.pushInFlight.Load, s.pushWait, 3*time.Second)
+}
+
+// waitInFlightPushes lets async reports finish (and restore traffic on
+// failure) before the final synchronous snapshot is taken.
+func (s *Service) waitInFlightPushes() {
+	waitCount(s.pushInFlight.Load, s.pushWait, 3*time.Second)
+}
+
+func waitCount(remaining func() int32, limit, fallback time.Duration) {
+	if limit <= 0 {
+		limit = fallback
 	}
-	deadline := time.Now().Add(wait)
-	for (s.certWorkers.Load() > 0 || s.pushInFlight.Load() > 0) && time.Now().Before(deadline) {
+	deadline := time.Now().Add(limit)
+	for remaining() > 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
@@ -410,7 +422,10 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.pushReportSync()
+			// Let in-flight reports finish first: a failed one restores its
+			// traffic into the tracker, and the final snapshot must include it.
+			s.waitInFlightPushes()
+			s.pushReportSyncBounded()
 			return nil
 
 		case <-trackTicker.C:
@@ -681,6 +696,14 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 	applied := cfg
 
 	for {
+		if ctx.Err() != nil {
+			// Shutdown cancelled the worker scope: do not run another round
+			// (and its backoff wait) for a pending config.
+			s.certMu.Lock()
+			s.certBusy = false
+			s.certMu.Unlock()
+			return
+		}
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		changed, err := reconfigure(rctx, cfg)
 		cancel()
@@ -1545,15 +1568,13 @@ func (s *Service) pushReportAsync() {
 		metrics["kernel_status"] = s.kernelRunning()
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 			nlog.Core().Warn("failed to push report", "error", err)
-			if !s.shuttingDown.Load() {
-				if len(traffic) > 0 {
-					s.tracker.RestoreTraffic(traffic)
-				}
-				if len(aliveIPs) > 0 {
-					// Alive IPs are a full snapshot, not a delta: drop the change
-					// cache so the next flush resends everything.
-					s.tracker.MarkAliveIPsStale()
-				}
+			if len(traffic) > 0 {
+				s.tracker.RestoreTraffic(traffic)
+			}
+			if len(aliveIPs) > 0 {
+				// Alive IPs are a full snapshot, not a delta: drop the change
+				// cache so the next flush resends everything.
+				s.tracker.MarkAliveIPsStale()
 			}
 			s.pushBackoff.onFailure()
 			return
@@ -1561,6 +1582,26 @@ func (s *Service) pushReportAsync() {
 		s.pushBackoff.onSuccess()
 		nlog.ReportPushed(len(traffic), len(online))
 	}()
+}
+
+// pushReportSyncBounded runs the final report with the shutdown budget. The
+// payload maps are flushed and owned by the goroutine, so a late completion
+// cannot race a tracker mutation; the daemon's hard kill bounds the rest.
+func (s *Service) pushReportSyncBounded() {
+	limit := s.finalReportWait
+	if limit <= 0 {
+		limit = 4 * time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		s.pushReportSync()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		nlog.Core().Warn("final report did not finish within the shutdown budget", "limit", limit)
+	}
 }
 
 // pushReportSync is used only during shutdown to ensure final data is sent.

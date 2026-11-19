@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/tracker"
 )
@@ -86,9 +87,6 @@ func TestShutdownWorkersCancelsAndJoinsCertWorker(t *testing.T) {
 	if got := svc.certWorkers.Load(); got != 0 {
 		t.Fatalf("cert workers still running after shutdown: %d", got)
 	}
-	if !svc.shuttingDown.Load() {
-		t.Fatal("shutdown flag not set")
-	}
 	select {
 	case <-wsCtx.Done():
 	default:
@@ -99,7 +97,8 @@ func TestShutdownWorkersCancelsAndJoinsCertWorker(t *testing.T) {
 // A worker that ignores cancellation must not hold shutdown past the bound.
 func TestShutdownWorkersIsBounded(t *testing.T) {
 	svc := newTestService(&fakeKernel{running: true})
-	svc.shutdownWait = 50 * time.Millisecond
+	svc.shutdownWait = 20 * time.Millisecond
+	svc.pushWait = 50 * time.Millisecond
 	svc.pushInFlight.Add(1)
 	defer svc.pushInFlight.Add(-1)
 
@@ -110,5 +109,93 @@ func TestShutdownWorkersIsBounded(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
 		t.Fatalf("shutdown did not wait for the in-flight worker: %v", elapsed)
+	}
+}
+
+type blockingSink struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSink) Report(controlplane.ReportPayload) error {
+	if s.entered != nil {
+		s.entered <- struct{}{}
+	}
+	if s.release != nil {
+		<-s.release
+	}
+	return nil
+}
+func (s *blockingSink) ReportDevices(controlplane.PushClient, map[int][]string) bool {
+	return false
+}
+func (s *blockingSink) SupportsReporting() bool     { return true }
+func (s *blockingSink) SupportsDeviceReports() bool { return false }
+
+// Async reports must be counted and joined: a failed one restores traffic into
+// the tracker that the final snapshot then flushes.
+func TestPushReportAsyncIsCountedAndJoined(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	svc.cfg = &config.Config{}
+	svc.source = &fakeSource{}
+	svc.tracker = tracker.New()
+	svc.tracker.Process(nil, map[int]map[string]bool{1: {"1.2.3.4": true}}, 1)
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	svc.sink = &blockingSink{entered: entered, release: release}
+	svc.pushWait = time.Second
+
+	svc.pushReportAsync()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async report did not start")
+	}
+	if got := svc.pushInFlight.Load(); got != 1 {
+		t.Fatalf("pushInFlight = %d, want 1", got)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		svc.waitInFlightPushes()
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("wait returned while a report was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not return after the report finished")
+	}
+	if got := svc.pushInFlight.Load(); got != 0 {
+		t.Fatalf("pushInFlight = %d after completion", got)
+	}
+}
+
+// The final report must not exceed the shutdown budget.
+func TestFinalReportIsBounded(t *testing.T) {
+	svc := newTestService(&fakeKernel{running: true})
+	svc.cfg = &config.Config{}
+	svc.source = &fakeSource{}
+	svc.tracker = tracker.New()
+	release := make(chan struct{})
+	svc.sink = &blockingSink{release: release}
+	svc.finalReportWait = 50 * time.Millisecond
+	defer close(release)
+
+	start := time.Now()
+	svc.pushReportSyncBounded()
+	elapsed := time.Since(start)
+	if elapsed > time.Second {
+		t.Fatalf("final report waited too long: %v", elapsed)
+	}
+	if elapsed < 40*time.Millisecond {
+		t.Fatalf("final report did not wait for the sink: %v", elapsed)
 	}
 }
