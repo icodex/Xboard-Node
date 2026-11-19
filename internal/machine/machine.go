@@ -440,6 +440,8 @@ type wsSender interface {
 	SendRaw(event string, data json.RawMessage)
 }
 
+var _ wsSender = (*panel.WSClient)(nil)
+
 // machineNodePush implements controlplane.PushClient for a single node
 // backed by the shared machine WS connection. Events are routed by the
 // WS mux directly to the Service's channels; this adapter only provides

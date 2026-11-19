@@ -282,3 +282,50 @@ func TestNodeMailboxUserDeltaOrderBeforeDrain(t *testing.T) {
 		t.Fatalf("remove was not compacted: %v", state.Users)
 	}
 }
+
+// Removing the last user must produce a non-nil empty slice: handleWSEvent
+// treats a nil users payload as "no update" and would keep the removed user
+// alive forever (old implementation returned nil here).
+func TestNodeMailboxRemovingAllUsersKeepsNonNilEmptySlice(t *testing.T) {
+	mb := NewNodeMailbox()
+	mb.SeedBaseline([]model.UserSpec{{ID: 1, UUID: "a"}, {ID: 2, UUID: "b"}}, nil)
+	mb.MarkReady()
+
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "remove", DeltaUsers: []model.UserSpec{{ID: 1}, {ID: 2}}})
+	state := mb.DrainIfReady()
+
+	if !state.HasUsers {
+		t.Fatal("removing all users must still drain a users update")
+	}
+	if state.Users == nil {
+		t.Fatal("empty result must be non-nil so the service does not early-return")
+	}
+	if len(state.Users) != 0 {
+		t.Fatalf("users = %v, want empty", state.Users)
+	}
+}
+
+// After compaction the index must be rebuilt, otherwise a later add reuses a
+// stale position and the user lands in the wrong slot or duplicates.
+func TestNodeMailboxAddAfterDrainUsesRebuiltIndex(t *testing.T) {
+	mb := NewNodeMailbox()
+	mb.SeedBaseline([]model.UserSpec{{ID: 1, UUID: "a"}, {ID: 2, UUID: "b"}}, nil)
+	mb.MarkReady()
+
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "remove", DeltaUsers: []model.UserSpec{{ID: 1}}})
+	if st := mb.DrainIfReady(); len(st.Users) != 1 {
+		t.Fatalf("after remove: %v", st.Users)
+	}
+
+	mb.Apply(Event{Type: EventSyncUserDelta, DeltaAction: "add", DeltaUsers: []model.UserSpec{{ID: 3, UUID: "c"}, {ID: 1, UUID: "a2"}}})
+	state := mb.DrainIfReady()
+	want := map[int]string{2: "b", 3: "c", 1: "a2"}
+	if len(state.Users) != len(want) {
+		t.Fatalf("users = %v, want %v", state.Users, want)
+	}
+	for _, user := range state.Users {
+		if want[user.ID] != user.UUID {
+			t.Fatalf("user %d = %q, want %q", user.ID, user.UUID, want[user.ID])
+		}
+	}
+}

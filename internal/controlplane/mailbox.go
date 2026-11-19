@@ -156,6 +156,7 @@ func (m *NodeMailbox) DrainIfReady() MailboxState {
 	}
 	if m.dirtyUsers {
 		if len(m.userDeleted) > 0 {
+			oldLen := len(m.users)
 			compacted := m.users[:0]
 			for _, user := range m.users {
 				if _, dead := m.userDeleted[user.ID]; dead {
@@ -163,7 +164,15 @@ func (m *NodeMailbox) DrainIfReady() MailboxState {
 				}
 				compacted = append(compacted, user)
 			}
+			kept := len(compacted)
 			m.users = compacted
+			// Drop references held by the tail of the backing array: removed
+			// users' UUIDs would otherwise stay reachable until overwritten.
+			tail := m.users[:oldLen]
+			for i := kept; i < oldLen; i++ {
+				tail[i] = model.UserSpec{}
+			}
+			m.users = tail[:kept]
 			m.userDeleted = nil
 			m.rebuildUserIndexLocked()
 		}
