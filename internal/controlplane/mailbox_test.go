@@ -68,6 +68,64 @@ func TestNodeMailboxDevicesLatestWins(t *testing.T) {
 	}
 }
 
+func TestNodeMailboxDeviceDeltaMergesInsteadOfReplacing(t *testing.T) {
+	mb := NewNodeMailbox()
+	// full snapshot first: users 1 and 2 have devices
+	mb.Apply(Event{Type: EventSyncDevices, DeviceUsers: map[int][]string{
+		1: {"1.1.1.1"},
+		2: {"2.2.2.2"},
+	}})
+	mb.MarkReady()
+	mb.DrainIfReady()
+
+	// delta touches user 1 only; user 2 must survive
+	mb.Apply(Event{Type: EventSyncDevicesDelta, DeviceUsers: map[int][]string{1: {"9.9.9.9"}}})
+	state := mb.DrainIfReady()
+	if !state.HasDevices {
+		t.Fatal("expected devices state")
+	}
+	if got := state.DeviceUsers[1][0]; got != "9.9.9.9" {
+		t.Fatalf("delta did not update user 1: %v", state.DeviceUsers)
+	}
+	if got := state.DeviceUsers[2][0]; got != "2.2.2.2" {
+		t.Fatalf("delta dropped unrelated user 2: %v", state.DeviceUsers)
+	}
+}
+
+func TestNodeMailboxDeviceDeltaRemovesUsers(t *testing.T) {
+	mb := NewNodeMailbox()
+	mb.Apply(Event{Type: EventSyncDevices, DeviceUsers: map[int][]string{
+		1: {"1.1.1.1"},
+		2: {"2.2.2.2"},
+	}})
+	mb.MarkReady()
+	mb.DrainIfReady()
+
+	mb.Apply(Event{Type: EventSyncDevicesDelta, DeviceUsersRemoved: []int{1}})
+	state := mb.DrainIfReady()
+	if _, ok := state.DeviceUsers[1]; ok {
+		t.Fatalf("user 1 should be gone: %v", state.DeviceUsers)
+	}
+	if got := state.DeviceUsers[2][0]; got != "2.2.2.2" {
+		t.Fatalf("user 2 should survive: %v", state.DeviceUsers)
+	}
+}
+
+func TestNodeMailboxDeviceDeltaWithoutSnapshotRequestsReconcile(t *testing.T) {
+	mb := NewNodeMailbox()
+	mb.MarkReady()
+
+	mb.Apply(Event{Type: EventSyncDevicesDelta, DeviceUsers: map[int][]string{1: {"1.1.1.1"}}})
+
+	state := mb.DrainIfReady()
+	if !state.NeedsReconcile {
+		t.Fatal("a delta before any full snapshot must trigger a reconcile")
+	}
+	if state.HasDevices {
+		t.Fatalf("partial device state must not be applied: %v", state.DeviceUsers)
+	}
+}
+
 func TestNodeMailboxReconcileNotifies(t *testing.T) {
 	mb := NewNodeMailbox()
 	mb.MarkReady()

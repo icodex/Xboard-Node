@@ -21,17 +21,18 @@ type MailboxState struct {
 // yet ready to process them. Events are coalesced (latest-wins) and drained
 // as a single snapshot once the service marks the mailbox as ready.
 type NodeMailbox struct {
-	mu               sync.Mutex
-	ready            bool
-	config           *model.NodeSpec
-	users            []model.UserSpec
-	deviceUsers      map[int][]string
-	dirtyConfig      bool
-	dirtyUsers       bool
-	dirtyDevices     bool
-	needsReconcile   bool
-	hasFullUserState bool
-	notifyCh         chan struct{}
+	mu                 sync.Mutex
+	ready              bool
+	config             *model.NodeSpec
+	users              []model.UserSpec
+	deviceUsers        map[int][]string
+	dirtyConfig        bool
+	dirtyUsers         bool
+	dirtyDevices       bool
+	needsReconcile     bool
+	hasFullUserState   bool
+	hasFullDeviceState bool
+	notifyCh           chan struct{}
 }
 
 func NewNodeMailbox() *NodeMailbox {
@@ -81,8 +82,30 @@ func (m *NodeMailbox) Apply(event Event) {
 	case EventSyncDevices:
 		if event.DeviceUsers != nil {
 			m.deviceUsers = cloneDeviceUsers(event.DeviceUsers)
+			m.hasFullDeviceState = true
 			m.dirtyDevices = true
 			changed = true
+		}
+	case EventSyncDevicesDelta:
+		if len(event.DeviceUsers) > 0 || len(event.DeviceUsersRemoved) > 0 {
+			if !m.hasFullDeviceState {
+				// A delta without a baseline cannot be applied: the full snapshot
+				// replaces the map, so ask the panel for a fresh one.
+				m.needsReconcile = true
+				changed = true
+			} else {
+				if m.deviceUsers == nil {
+					m.deviceUsers = make(map[int][]string)
+				}
+				for uid, ips := range event.DeviceUsers {
+					m.deviceUsers[uid] = append([]string(nil), ips...)
+				}
+				for _, uid := range event.DeviceUsersRemoved {
+					delete(m.deviceUsers, uid)
+				}
+				m.dirtyDevices = true
+				changed = true
+			}
 		}
 	case EventSyncUserDelta:
 		if len(event.DeltaUsers) > 0 {

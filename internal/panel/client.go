@@ -26,6 +26,10 @@ import (
 // all of them. The WS side already limits messages to 10 MiB.
 const maxResponseBytes = 64 << 20
 
+// CapabilityDeviceDelta is advertised in report.status so the panel knows it may
+// send sync.devices.delta (only changed users) instead of the full snapshot.
+const CapabilityDeviceDelta = "device_delta"
+
 var (
 	trafficMapPool = sync.Pool{New: func() interface{} { return make(map[string][2]int64) }}
 	aliveMapPool   = sync.Pool{New: func() interface{} { return make(map[string][]string) }}
@@ -166,6 +170,9 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 		"mem":  map[string]interface{}{"total": mem[0], "used": mem[1]},
 		"swap": map[string]interface{}{"total": swap[0], "used": swap[1]},
 		"disk": map[string]interface{}{"total": disk[0], "used": disk[1]},
+		// Feature advertisement: the panel only sends sync.devices.delta to nodes
+		// that list it here, so older nodes keep receiving the full snapshot.
+		"capabilities": []string{CapabilityDeviceDelta},
 	}
 	payload["status"] = status
 

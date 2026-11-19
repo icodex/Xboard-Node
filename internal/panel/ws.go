@@ -17,12 +17,13 @@ import (
 
 // WSEvent types
 const (
-	WSEventSyncConfig    = "sync.config"
-	WSEventSyncUsers     = "sync.users"
-	WSEventSyncUserDelta = "sync.user.delta"
-	WSEventSyncDevices   = "sync.devices"   // panel → node: global device state
-	WSEventSyncNodes     = "sync.nodes"     // panel → machine: node list changed
-	WSEventReportDevices = "report.devices" // node → panel: report device snapshot
+	WSEventSyncConfig       = "sync.config"
+	WSEventSyncUsers        = "sync.users"
+	WSEventSyncUserDelta    = "sync.user.delta"
+	WSEventSyncDevices      = "sync.devices"       // panel → node: global device state
+	WSEventSyncDevicesDelta = "sync.devices.delta" // panel → node: only changed users
+	WSEventSyncNodes        = "sync.nodes"         // panel → machine: node list changed
+	WSEventReportDevices    = "report.devices"     // node → panel: report device snapshot
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -34,8 +35,10 @@ type WSEvent struct {
 	DeltaUsers  []User // users affected by the delta
 
 	// Device sync fields
-	DeviceUsers map[int][]string // userID -> IPs (for sync.devices)
-	NodeID      int
+	DeviceUsers map[int][]string // userID -> IPs (for sync.devices / sync.devices.delta set)
+	// DeviceUsersRemoved lists users to drop (sync.devices.delta only).
+	DeviceUsersRemoved []int
+	NodeID             int
 
 	// Machine node discovery fields (for sync.nodes)
 	Nodes []MachineNode
@@ -76,6 +79,15 @@ type syncUserDeltaPayload struct {
 // syncDevicesPayload carries global device state from panel.
 type syncDevicesPayload struct {
 	Users     map[int][]string `json:"users"`
+	Timestamp int64            `json:"timestamp"`
+	NodeID    int              `json:"node_id"`
+}
+
+// syncDevicesDeltaPayload carries only the users whose device state changed.
+// The panel sends it once the node advertises the device_delta capability.
+type syncDevicesDeltaPayload struct {
+	Set       map[int][]string `json:"set"`
+	Remove    []int            `json:"remove"`
 	Timestamp int64            `json:"timestamp"`
 	NodeID    int              `json:"node_id"`
 }
@@ -436,6 +448,9 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventSyncDevices:
 		w.handleDataEvent(msg)
 
+	case WSEventSyncDevicesDelta:
+		w.handleDataEvent(msg)
+
 	case WSEventSyncNodes:
 		w.handleDataEvent(msg)
 
@@ -552,6 +567,24 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 			return
 		}
 		event.DeviceUsers = p.Users
+		event.NodeID = p.NodeID
+
+	case WSEventSyncDevicesDelta:
+		var raw map[string]interface{}
+		if err := json.Unmarshal(msg.Data, &raw); err != nil {
+			nlog.Core().Warn("ws: cannot decode device delta payload", "error", err)
+			return
+		}
+		if set, ok := raw["set"].([]interface{}); ok && len(set) == 0 {
+			raw["set"] = map[string]interface{}{}
+		}
+		var p syncDevicesDeltaPayload
+		if err := decodeWeakRaw(raw, &p); err != nil {
+			nlog.Core().Warn("ws: cannot decode device delta payload", "error", err)
+			return
+		}
+		event.DeviceUsers = p.Set
+		event.DeviceUsersRemoved = p.Remove
 		event.NodeID = p.NodeID
 
 	case WSEventSyncNodes:

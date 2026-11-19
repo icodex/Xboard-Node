@@ -190,7 +190,12 @@ func (p *PanelControlPlane) newPushClient(metricsFn func() map[string]interface{
 }
 
 func TranslateWSEvent(event panel.WSEvent, kcfg config.KernelConfig) (Event, error) {
-	translated := Event{Type: EventType(event.Type), DeltaAction: event.DeltaAction, DeviceUsers: event.DeviceUsers}
+	translated := Event{
+		Type:               EventType(event.Type),
+		DeltaAction:        event.DeltaAction,
+		DeviceUsers:        event.DeviceUsers,
+		DeviceUsersRemoved: event.DeviceUsersRemoved,
+	}
 	if event.Config != nil {
 		var err error
 		translated.Config, err = model.NodeSpecFromPanelValidated(event.Config, kcfg)

@@ -9,10 +9,11 @@ import (
 type EventType string
 
 const (
-	EventSyncConfig    EventType = "sync.config"
-	EventSyncUsers     EventType = "sync.users"
-	EventSyncUserDelta EventType = "sync.user.delta"
-	EventSyncDevices   EventType = "sync.devices"
+	EventSyncConfig       EventType = "sync.config"
+	EventSyncUsers        EventType = "sync.users"
+	EventSyncUserDelta    EventType = "sync.user.delta"
+	EventSyncDevices      EventType = "sync.devices"
+	EventSyncDevicesDelta EventType = "sync.devices.delta"
 )
 
 type Event struct {
@@ -22,6 +23,10 @@ type Event struct {
 	DeltaAction string
 	DeltaUsers  []model.UserSpec
 	DeviceUsers map[int][]string
+	// DeviceUsersRemoved lists users whose device entry must be dropped.
+	// Only used by EventSyncDevicesDelta; EventSyncDevices still replaces
+	// the whole snapshot.
+	DeviceUsersRemoved []int
 }
 
 type StatusChange struct {
