@@ -736,8 +736,9 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 		nlog.Core().Warn("hysteria requires TLS certificate files on disk; configure cert_mode (self, file, http, dns, or content). Sing-box will not start this inbound without tls.")
 		return base
 	}
-	// Hysteria/Hysteria2 uses QUIC and requires ALPN; default to h3 if not set.
-	if _, ok := tls["alpn"]; !ok {
+	// Hysteria/Hysteria2 uses QUIC and requires ALPN; default to h3 when the
+	// panel omits or clears it (an empty array is not a usable ALPN list).
+	if !alpnHasValue(tls["alpn"]) {
 		tls["alpn"] = []string{"h3"}
 	}
 	base["tls"] = tls
@@ -837,8 +838,9 @@ func buildTUIC(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLS
 		nlog.Core().Warn("tuic requires TLS certificate files on disk; configure cert_mode (self, file, http, dns, or content). Sing-box will not start this inbound without tls.")
 		return base
 	}
-	// TUIC requires ALPN for QUIC negotiation; default to h3 if not set by panel.
-	if _, ok := tls["alpn"]; !ok {
+	// TUIC requires ALPN for QUIC negotiation; default to h3 when the panel
+	// omits or clears it.
+	if !alpnHasValue(tls["alpn"]) {
 		tls["alpn"] = []string{"h3"}
 	}
 	base["tls"] = tls
@@ -1045,7 +1047,7 @@ func buildTLSConfig(nc *model.NodeSpec, tc kernel.TLSCert) M {
 		}
 		// A panel that sends "alpn": null must not shadow the protocol default
 		// (naive needs h2, QUIC protocols need h3): treat null as absent.
-		if alpn, ok := nc.TLSSettings["alpn"]; ok && alpn != nil {
+		if alpn, ok := nc.TLSSettings["alpn"]; ok && alpnHasValue(alpn) {
 			t["alpn"] = alpn
 		}
 		// ECH server-side: only key/key_path needed for inbound

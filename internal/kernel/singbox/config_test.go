@@ -1423,3 +1423,36 @@ func TestBuildNaiveUsersUseUUID(t *testing.T) {
 		t.Fatalf("users = %#v", got)
 	}
 }
+
+// Panels may send an empty ALPN array after the operator clears the field.
+// Empty must behave like absent: QUIC protocols need h3, otherwise the QUIC
+// handshake has no common protocol.
+func TestBuildHysteriaALPNEmptyListDefaultsToH3(t *testing.T) {
+	tc := kernel.TLSCert{CertPEM: []byte("cert"), KeyPEM: []byte("key")}
+	nc := &model.NodeSpec{Protocol: "hysteria", Version: 2, TLS: 1, TLSSettings: map[string]any{"alpn": []any{}}}
+	in := buildHysteria(M{"type": "hysteria2"}, nc, nil, tc)
+	tls, ok := in["tls"].(M)
+	if !ok || !alpnHasValue(tls["alpn"]) || tls["alpn"].([]string)[0] != "h3" {
+		t.Fatalf("hysteria alpn = %#v, want [h3]", in["tls"])
+	}
+}
+
+func TestBuildTUICDefaultALPNEmptyListDefaultsToH3(t *testing.T) {
+	tc := kernel.TLSCert{CertPEM: []byte("cert"), KeyPEM: []byte("key")}
+	nc := &model.NodeSpec{Protocol: "tuic", TLSSettings: map[string]any{"alpn": []any{}}}
+	in := buildTUIC(M{"type": "tuic"}, nc, nil, tc)
+	tls, ok := in["tls"].(M)
+	if !ok || !alpnHasValue(tls["alpn"]) || tls["alpn"].([]string)[0] != "h3" {
+		t.Fatalf("tuic alpn = %#v, want [h3]", in["tls"])
+	}
+}
+
+func TestBuildNaiveALPNEmptyListDefaultsToH2(t *testing.T) {
+	tc := kernel.TLSCert{CertPEM: []byte("cert"), KeyPEM: []byte("key")}
+	nc := &model.NodeSpec{Protocol: "naive", TLS: 1, TLSSettings: map[string]any{"alpn": []any{}}}
+	in := buildNaive(M{"type": "naive"}, nc, nil, tc)
+	tls := in["tls"].(M)
+	if !alpnHasValue(tls["alpn"]) || tls["alpn"].([]string)[0] != "h2" {
+		t.Fatalf("naive alpn = %#v, want [h2]", tls["alpn"])
+	}
+}
