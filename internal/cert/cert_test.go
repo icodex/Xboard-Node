@@ -424,3 +424,17 @@ func TestManagerStopCancelsLifetime(t *testing.T) {
 		t.Fatal("Stop must clear the lifetime")
 	}
 }
+
+// A cert worker may still reach Reconfigure after the service tore the manager
+// down; that must fail instead of re-arming ACME maintenance.
+func TestReconfigureAfterStopFails(t *testing.T) {
+	m := NewManager(config.CertConfig{CertMode: "none"})
+	m.Stop()
+
+	if _, err := m.Reconfigure(context.Background(), config.CertConfig{CertMode: "none"}); err == nil {
+		t.Fatal("Reconfigure after Stop must fail")
+	}
+	if m.lifetime() != nil || m.acmeStarted {
+		t.Fatal("a stopped manager must not re-arm state")
+	}
+}

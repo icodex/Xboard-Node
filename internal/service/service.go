@@ -114,6 +114,20 @@ type Service struct {
 	// certReconfigure performs one reconfiguration attempt. Nil uses the cert
 	// manager; tests override it to count attempts without touching files.
 	certReconfigure func(opCtx context.Context, cfg config.CertConfig) (bool, error)
+
+	// certCtx scopes certificate reconfiguration workers. Shutdown cancels it
+	// and waits (bounded) before cert.Stop, so a worker cannot re-arm ACME
+	// after the manager was stopped.
+	certCtx    context.Context
+	certCancel context.CancelFunc
+
+	// pushInFlight counts async report goroutines. Shutdown waits for them
+	// (bounded) and skips failure restores into a tracker that is going away.
+	pushInFlight atomic.Int32
+	shuttingDown atomic.Bool
+
+	// shutdownWait bounds the worker waits above; tests lower it.
+	shutdownWait time.Duration
 }
 
 // certUpdate carries an applied certificate configuration back to the main
@@ -303,6 +317,31 @@ func (s *Service) kernelRunning() bool {
 	return k != nil && k.IsRunning()
 }
 
+// shutdownWorkers cancels certificate reconfiguration and waits (bounded) for
+// workers and async reports to finish before cert.Stop. The bound matters:
+// ACME issuance can ignore cancellation for a while, and the daemon only
+// allows a short shutdown budget. The manager refuses reconfiguration once
+// stopped, so a straggler cannot re-arm maintenance.
+func (s *Service) shutdownWorkers() {
+	s.shuttingDown.Store(true)
+	if s.certCancel != nil {
+		s.certCancel()
+	}
+	// The WS client goroutine derives from the run context; cancel it too so a
+	// service rebuilt after a setup error does not leave it parked on ctx.
+	if s.wsCancel != nil {
+		s.wsCancel()
+	}
+	wait := s.shutdownWait
+	if wait <= 0 {
+		wait = 5 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for (s.certWorkers.Load() > 0 || s.pushInFlight.Load() > 0) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // stopCurrentKernel stops whatever kernel is running now. Run's deferred stop
 // has to resolve the kernel at exit: with kernel.type auto the kernel object
 // can be replaced after Run starts, and binding the original receiver would
@@ -330,6 +369,12 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cert manager: %w", err)
 	}
 	defer s.cert.Stop()
+
+	// Workers (certificate reconfiguration, async reports) must not outlive
+	// this Run: cancel their scope and join them before cert.Stop.
+	certCtx, certCancel := context.WithCancel(ctx)
+	s.certCtx, s.certCancel = certCtx, certCancel
+	defer s.shutdownWorkers()
 
 	// Handshake: get WS config + initial data in one call
 	if err := s.initialSetup(ctx); err != nil {
@@ -590,6 +635,10 @@ func (s *Service) nodeCertDir(domain string) string {
 // goroutine. A config arriving while one run is in flight replaces the pending
 // one (latest wins); the running ACME attempt is not interrupted.
 func (s *Service) startCertReconfigure(ctx context.Context, cfg config.CertConfig) {
+	if s.certCtx != nil {
+		// Run owns the worker scope; a retry loop must stop with it.
+		ctx = s.certCtx
+	}
 	s.certMu.Lock()
 	if s.certBusy {
 		s.certPending = &cfg
@@ -1485,7 +1534,9 @@ func (s *Service) pushReportAsync() {
 	aliveIPs := s.tracker.FlushAliveIPs(tracker.ConsumerReport)
 	online := s.tracker.CurrentOnline()
 
+	s.pushInFlight.Add(1)
 	go func() {
+		defer s.pushInFlight.Add(-1)
 		defer s.pushActive.Store(false)
 		// System stats (procfs/statfs) must not block the main loop that
 		// handles WS events and kernel user updates.
@@ -1494,13 +1545,15 @@ func (s *Service) pushReportAsync() {
 		metrics["kernel_status"] = s.kernelRunning()
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 			nlog.Core().Warn("failed to push report", "error", err)
-			if len(traffic) > 0 {
-				s.tracker.RestoreTraffic(traffic)
-			}
-			if len(aliveIPs) > 0 {
-				// Alive IPs are a full snapshot, not a delta: drop the change
-				// cache so the next flush resends everything.
-				s.tracker.MarkAliveIPsStale()
+			if !s.shuttingDown.Load() {
+				if len(traffic) > 0 {
+					s.tracker.RestoreTraffic(traffic)
+				}
+				if len(aliveIPs) > 0 {
+					// Alive IPs are a full snapshot, not a delta: drop the change
+					// cache so the next flush resends everything.
+					s.tracker.MarkAliveIPsStale()
+				}
 			}
 			s.pushBackoff.onFailure()
 			return

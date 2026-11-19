@@ -63,6 +63,7 @@ type Manager struct {
 	lifeMu     sync.Mutex
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
+	stopped    atomic.Bool
 
 	acmeMu          sync.Mutex
 	cache           *certmagic.Cache
@@ -192,6 +193,9 @@ func (m *Manager) loadPersistedPEM() bool {
 // maintenance runs on the manager lifetime created by Start, so Stop can
 // cancel it without racing the worker that calls this method.
 func (m *Manager) Reconfigure(opCtx context.Context, newCfg config.CertConfig) (bool, error) {
+	if m.stopped.Load() {
+		return false, fmt.Errorf("cert manager stopped")
+	}
 	if newCfg.CertDir == "" {
 		newCfg.CertDir = m.cfg.CertDir
 	}
@@ -406,6 +410,7 @@ func (m *Manager) start(ctx, lifetimeCtx context.Context) error {
 // the teardown also releases the certmagic cache. Locking keeps this safe
 // against a Reconfigure worker running on the service goroutine.
 func (m *Manager) Stop() {
+	m.stopped.Store(true)
 	m.lifeMu.Lock()
 	cancel := m.lifeCancel
 	m.lifeCtx, m.lifeCancel = nil, nil
@@ -643,6 +648,11 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 	}
 
 	m.acmeMu.Lock()
+	if m.stopped.Load() {
+		m.acmeMu.Unlock()
+		acmeCancel()
+		return fmt.Errorf("cert manager stopped")
+	}
 	m.acmeCancel = acmeCancel
 	m.acmeFingerprint = acmeFingerprint(m.cfg)
 	m.acmeStarted = true
