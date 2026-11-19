@@ -874,8 +874,12 @@ func buildNaive(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.TL
 
 	userList := make([]M, 0, len(users))
 	for _, u := range users {
+		// The panel subscription authenticates naive as UUID:UUID, and
+		// sing-box reports metadata.User as the username: using the numeric ID
+		// here both rejected subscription clients and left per-user traffic
+		// unattributed (the tracker maps UUIDs).
 		userList = append(userList, M{
-			"username": strconv.Itoa(u.ID),
+			"username": u.UUID,
 			"password": u.UUID,
 		})
 	}

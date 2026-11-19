@@ -1411,3 +1411,13 @@ func TestBuildNaiveALPNKeptWhenSet(t *testing.T) {
 		t.Fatalf("alpn lost: %#v", got)
 	}
 }
+
+func TestBuildNaiveUsersUseUUID(t *testing.T) {
+	nc := &model.NodeSpec{Protocol: "naive"}
+	users := []model.UserSpec{{ID: 7, UUID: "uuid-7"}}
+	in := buildNaive(M{"type": "naive"}, nc, users, kernel.TLSCert{})
+	got, _ := in["users"].([]M)
+	if len(got) != 1 || got[0]["username"] != "uuid-7" || got[0]["password"] != "uuid-7" {
+		t.Fatalf("users = %#v", got)
+	}
+}
