@@ -179,8 +179,9 @@ func TestOrchestratorRediscoverAddKeepRemove(t *testing.T) {
 		t.Fatal("nodes 1 and 2 should both be running")
 	}
 
-	// Remove 1, keep 2. rediscover stops the node synchronously: after it
-	// returns the handle must be gone and the service goroutine exited.
+	// Remove 1, keep 2. rediscover unregisters the node and cancels it
+	// without waiting for the service goroutine to exit (that wait is bounded
+	// elsewhere); the handle and mailbox must be gone when it returns.
 	p.setNodes([]panel.MachineNode{node(2)})
 	o.rediscover(ctx)
 	if handleExists(t, o, 1) {
@@ -350,5 +351,80 @@ func TestMachineNodePushLateBindsSharedWS(t *testing.T) {
 	}
 	if len(sender.events) != 1 {
 		t.Fatalf("disconnected sender must not deliver: %v", sender.events)
+	}
+}
+
+// rediscover must not wait for a removed node's service to exit: the final
+// report and worker joins can take seconds and used to stall the whole
+// discovery/status loop.
+func TestRediscoverDoesNotBlockOnSlowStop(t *testing.T) {
+	p := newPanelStub(t, nil)
+	o := newTestOrchestrator(t, p)
+
+	done := make(chan struct{})
+	canceled := false
+	h := &nodeHandle{
+		done:    done,
+		cancel:  func() { canceled = true },
+		mailbox: controlplane.NewNodeMailbox(),
+	}
+	o.mu.Lock()
+	o.nodes[9] = h
+	o.mu.Unlock()
+	o.eventsMu.Lock()
+	o.mailboxes[9] = h.mailbox
+	o.eventsMu.Unlock()
+
+	start := time.Now()
+	o.rediscover(context.Background())
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("rediscover blocked on node exit: %v", elapsed)
+	}
+	if !canceled {
+		t.Fatal("detached node was not cancelled")
+	}
+	if handleExists(t, o, 9) {
+		t.Fatal("detached handle still registered")
+	}
+	o.eventsMu.RLock()
+	_, mailbox := o.mailboxes[9]
+	o.eventsMu.RUnlock()
+	if mailbox {
+		t.Fatal("detached mailbox still registered")
+	}
+
+	close(done)
+	deadline := time.Now().Add(time.Second)
+	for {
+		o.mu.Lock()
+		left := len(o.stopping)
+		o.mu.Unlock()
+		if left == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stopping entry not reaped, left %d", left)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A restarted node waits on the previous instance's exit before binding ports.
+func TestAwaitStop(t *testing.T) {
+	if !awaitStop(context.Background(), nil) {
+		t.Fatal("nil stop channel must return immediately")
+	}
+
+	closed := make(chan struct{})
+	close(closed)
+	if !awaitStop(context.Background(), closed) {
+		t.Fatal("closed stop channel must return")
+	}
+
+	open := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if awaitStop(ctx, open) {
+		t.Fatal("cancelled context must abandon the wait")
 	}
 }

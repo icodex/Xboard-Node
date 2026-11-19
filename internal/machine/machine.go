@@ -37,6 +37,10 @@ type Orchestrator struct {
 
 	mu    sync.Mutex
 	nodes map[int]*nodeHandle // node_id → handle
+	// stopping tracks nodes detached by rediscover whose service goroutine has
+	// not exited yet. A restarted node with the same ID waits on it before the
+	// kernel binds ports again; stopAll drains whatever remains.
+	stopping map[int]<-chan struct{}
 
 	// Per-node mailbox keyed by node_id. Shared WS events are aggregated here
 	// and each node service drains the latest state when ready.
@@ -128,6 +132,9 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 		o.mu.Unlock()
 		return
 	}
+	// A node removed by an earlier rediscover may still be shutting down; its
+	// kernel keeps the ports until Run returns.
+	prevStop := o.stopping[mn.ID]
 
 	nodeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -194,6 +201,13 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 			return mb
 		}
 
+		if prevStop != nil {
+			nlog.Core().Info("machine: waiting for the previous node instance to exit", "node_id", mn.ID)
+		}
+		if !awaitStop(nodeCtx, prevStop) {
+			return
+		}
+
 		cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
 		svc := service.NewWithControlPlane(nodeCfg, cp)
 		if err := svc.Run(nodeCtx); err != nil && nodeCtx.Err() == nil {
@@ -203,14 +217,21 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	}()
 }
 
-func (o *Orchestrator) stopNode(nodeID int) {
+// detachNode unregisters a node and cancels its service without waiting for
+// its goroutine to exit. The exit can take seconds (final report, cert worker
+// join), which used to stall the whole discovery/status loop.
+func (o *Orchestrator) detachNode(nodeID int) *nodeHandle {
 	o.mu.Lock()
 	h, ok := o.nodes[nodeID]
 	if !ok {
 		o.mu.Unlock()
-		return
+		return nil
 	}
 	delete(o.nodes, nodeID)
+	if o.stopping == nil {
+		o.stopping = make(map[int]<-chan struct{})
+	}
+	o.stopping[nodeID] = h.done
 	o.mu.Unlock()
 
 	o.eventsMu.Lock()
@@ -219,7 +240,34 @@ func (o *Orchestrator) stopNode(nodeID int) {
 
 	nlog.Core().Info(fmt.Sprintf("machine: stopping node %d", nodeID))
 	h.cancel()
-	<-h.done
+
+	// Reap the entry once the service is gone so the map only holds live
+	// shutdowns. A startNode that already read the channel still observes the
+	// close.
+	go func() {
+		<-h.done
+		o.mu.Lock()
+		if ch, ok := o.stopping[nodeID]; ok && ch == h.done {
+			delete(o.stopping, nodeID)
+		}
+		o.mu.Unlock()
+	}()
+
+	return h
+}
+
+// awaitStop blocks until a previously detached node has exited, or the new
+// node's context is cancelled.
+func awaitStop(ctx context.Context, ch <-chan struct{}) bool {
+	if ch == nil {
+		return true
+	}
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (o *Orchestrator) stopAll() {
@@ -244,7 +292,18 @@ func (o *Orchestrator) stopAll() {
 	for id := range handles {
 		delete(o.nodes, id)
 	}
+	// Nodes detached by an earlier rediscover are no longer in o.nodes but
+	// their services may still be exiting.
+	var stopping []<-chan struct{}
+	for _, ch := range o.stopping {
+		stopping = append(stopping, ch)
+	}
+	o.stopping = nil
 	o.mu.Unlock()
+
+	for _, ch := range stopping {
+		<-ch
+	}
 
 	if o.wsCancel != nil {
 		o.wsCancel()
@@ -282,7 +341,7 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 	o.mu.Unlock()
 
 	for _, id := range toRemove {
-		o.stopNode(id)
+		o.detachNode(id)
 	}
 
 	for _, n := range nodesResp.Nodes {
