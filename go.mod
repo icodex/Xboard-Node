@@ -297,4 +297,4 @@ replace github.com/xtls/reality => github.com/icodex/reality v0.0.0-202610310203
 
 replace github.com/xtls/xray-core => github.com/icodex/Xray-core v0.0.0-20261030205927-7b202337d0c5
 
-replace github.com/sagernet/sing-box => github.com/icodex/sing-box v1.14.1-0.20261119101946-d1a6f6904d0d
+replace github.com/sagernet/sing-box => github.com/icodex/sing-box v1.14.4-xboard.1
