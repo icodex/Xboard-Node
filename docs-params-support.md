@@ -64,6 +64,14 @@ toggle when sing-box nodes serve mux users.
 | `obfs` (v1 password / v2 salamander) | ✅ | ⚠️ xray hysteria has no obfs |
 | `hop_interval` | 📱 client subscription only | — |
 
+Panel-supplied `masquerade.file.dir` must resolve inside the node's
+`kernel.config_dir` (the directory itself is excluded — it holds `config.yml`
+and credentials). `masquerade.proxy.url` must be an `http`/`https` URL whose
+literal host is not loopback, private, link-local or multicast. Values outside
+these rules are dropped with a warning before the kernel config is built;
+hostnames are not resolved, so a DNS name pointing at a private address is not
+caught.
+
 ## Shadowsocks
 
 | Key | Note |
@@ -83,6 +91,10 @@ toggle when sing-box nodes serve mux users.
 | `tls_settings.ech.*` | ✅ key / key_path | ✅ echServerKeys |
 | vless `decryption` (encryption) | ⚠️ none/unsupported + warn | ✅ |
 | `utls.*` | 📱 client subscription only | 📱 |
+
+`tls_settings.ech.key_path` must resolve inside `kernel.config_dir`; an
+out-of-root path is dropped (the inline `key` survives when present, otherwise
+ECH is disabled) with a warning.
 
 ## Client-only keys (no server effect, by design)
 

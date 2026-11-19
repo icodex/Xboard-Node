@@ -165,6 +165,7 @@ func NodeSpecFromPanelValidated(nc *panel.NodeConfig, kcfg config.KernelConfig) 
 	if err := ValidateNodeSpec(spec, kcfg); err != nil {
 		return nil, err
 	}
+	sanitizePanelPaths(spec, kcfg.ConfigDir)
 	return spec, nil
 }
 

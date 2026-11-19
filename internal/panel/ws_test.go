@@ -1,8 +1,11 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
 // fakeWSServer simulates a minimal Workerman-style WS server for testing.
@@ -537,5 +542,52 @@ func TestValidateWSURL(t *testing.T) {
 				t.Errorf("ValidateWSURL(%q, %q) error = %v, wantError %v", tt.wsURL, tt.panelURL, err, tt.wantError)
 			}
 		})
+	}
+}
+
+// Debug logging must never dump the frame body: sync.config carries the TLS
+// private key and DNS tokens, sync.users carries user UUIDs (proxy passwords).
+func TestWSClient_DebugLogOmitsFramePayload(t *testing.T) {
+	const secret = "SECRET-UUID-4f9c2a"
+	usersData, _ := json.Marshal(syncUsersPayload{
+		Users:     []User{{ID: 7, UUID: secret}},
+		Timestamp: 1,
+	})
+	server := fakeWSServer(t, []wsMessage{{Event: WSEventSyncUsers, Data: usersData}})
+	defer server.Close()
+
+	var logs bytes.Buffer
+	nlog.Init(&logs, slog.LevelDebug, false)
+	t.Cleanup(func() { nlog.Init(io.Discard, slog.LevelInfo, false) })
+
+	received := make(chan struct{}, 1)
+	ws := NewWSClient(
+		"ws://"+strings.TrimPrefix(server.URL, "http://"),
+		"test-token", 1, WSClientConfig{},
+		func(event WSEvent) {
+			select {
+			case received <- struct{}{}:
+			default:
+			}
+		},
+		nil, func() map[string]interface{} { return nil },
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go ws.Run(ctx)
+
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the users event")
+	}
+
+	out := logs.String()
+	if strings.Contains(out, secret) {
+		t.Fatalf("debug log leaked the frame payload: %s", out)
+	}
+	if !strings.Contains(out, "data_len") {
+		t.Fatalf("expected data_len in ws debug log, got: %s", out)
 	}
 }

@@ -311,7 +311,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 		return fmt.Errorf("read auth response: %w", err)
 	}
 	extendReadDeadline()
-	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", string(firstMsg.Data))
+	nlog.Core().Debug("ws auth frame", "event", firstMsg.Event, "data_len", len(firstMsg.Data))
 
 	if firstMsg.Event == "error" {
 		var errData struct {
@@ -364,7 +364,10 @@ func (w *WSClient) connect(ctx context.Context) error {
 				return
 			}
 			extendReadDeadline()
-			nlog.Core().Debug("ws recv", "event", msg.Event, "data", string(msg.Data))
+			// Never log the frame body: sync.config carries the TLS private
+			// key and DNS API tokens, sync.users carries user UUIDs (the proxy
+			// passwords). The length is enough to debug framing issues.
+			nlog.Core().Debug("ws recv", "event", msg.Event, "data_len", len(msg.Data))
 			w.handleMessage(msg)
 			if msg.Event == "ping" {
 				select {
