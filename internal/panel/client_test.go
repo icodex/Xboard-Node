@@ -251,3 +251,24 @@ func TestGetUsers_WeakDecodeLegacyStrings(t *testing.T) {
 		t.Fatalf("users = %+v", users)
 	}
 }
+
+// Error bodies are not echoed into errors: a panel error page can contain the
+// request token.
+func TestClientErrorBodyNotEchoed(t *testing.T) {
+	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("token=super-secret&detail=boom"))
+	})
+	defer ts.Close()
+
+	_, err := client.GetConfig()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("error leaked the response body: %v", err)
+	}
+	if !strings.Contains(err.Error(), "byte body") {
+		t.Fatalf("error should report the body size: %v", err)
+	}
+}

@@ -359,3 +359,28 @@ func TestPrepareUserStateUsesKnownHash(t *testing.T) {
 		t.Fatalf("hash = %q, want known-hash", svc.lastUserHash)
 	}
 }
+
+// A stuck certificate reconfiguration must not block unrelated config changes
+// forever: after the bound the config applies with the current certificate.
+func TestApplyChangesBoundedByStuckCertWorker(t *testing.T) {
+	k := &fakeKernel{running: true}
+	svc := newTestService(k)
+	svc.lastConfig = &model.NodeSpec{Protocol: "vless", ServerPort: 1}
+	svc.lastUsers = []model.UserSpec{{ID: 1, UUID: "u1"}}
+	svc.certWorkers.Add(1)
+	defer svc.certWorkers.Add(-1)
+
+	svc.applyChanges(context.Background(), true, false)
+	if k.reloadCalls != 0 {
+		t.Fatal("a fresh cert reconfiguration must defer the config change")
+	}
+	if !svc.configDeferred.Load() {
+		t.Fatal("configDeferred not set")
+	}
+
+	svc.certDeferSince = time.Now().Add(-3 * time.Minute)
+	svc.applyChanges(context.Background(), true, false)
+	if k.reloadCalls == 0 {
+		t.Fatal("a stuck cert worker must not block config changes past the bound")
+	}
+}

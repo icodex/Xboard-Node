@@ -98,8 +98,12 @@ type LimitDispatcher struct {
 }
 
 // ipCounter tracks IPs for unlimited users without any lock.
+const maxUnlimitedIPsPerUser = 4096
+
 type ipCounter struct {
 	ips sync.Map // sourceIP → *atomic.Int64 (refcount)
+	// ipCount mirrors len(ips) without a Range; caps spoofed-address growth.
+	ipCount atomic.Int64
 	// live counts connections currently holding this counter. The entry is
 	// removed when it drops to zero; without it the map grew with every user
 	// that ever connected and GetConnectionState scanned them all each tick.
@@ -327,8 +331,16 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 				continue
 			}
 
-			// Increment IP refcount atomically.
-			rv, _ := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
+			// Increment IP refcount atomically. Beyond the cap the connection
+			// is admitted but not tracked, so the map stays bounded.
+			rv, loaded := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
+			if !loaded {
+				if ic.ipCount.Add(1) > maxUnlimitedIPsPerUser {
+					ic.ipCount.Add(-1)
+					ic.ips.Delete(sourceIP)
+					return false
+				}
+			}
 			rv.(*atomic.Int64).Add(1)
 			return false
 		}
@@ -361,6 +373,11 @@ func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 	if ips[sourceIP] > 0 {
 		ips[sourceIP]++
 		return false
+	}
+	if len(ips) >= maxUnlimitedIPsPerUser {
+		// A huge panel device limit must still not let this map grow without
+		// bound under spoofed source addresses.
+		return true
 	}
 
 	// Known globally (this or another node already serves this IP): allow and
@@ -512,6 +529,7 @@ func (d *LimitDispatcher) decUnlimited(email, sourceIP string) bool {
 	counter := rv.(*atomic.Int64)
 	if counter.Add(-1) <= 0 {
 		ic.ips.Delete(sourceIP)
+		ic.ipCount.Add(-1)
 	}
 	if ic.live.Add(-1) <= 0 {
 		d.unlimitedIPs.CompareAndDelete(email, ic)

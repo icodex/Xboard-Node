@@ -1,6 +1,7 @@
 package singbox
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -36,4 +37,20 @@ func TestConnTracker_PacketUnwrapCountsDirection(t *testing.T) {
 	if got := us.download.Load(); got != 50 {
 		t.Errorf("download = %d, want 50", got)
 	}
+}
+
+func TestUserStatsIPCapped(t *testing.T) {
+	us := &userStats{ips: make(map[string]int)}
+	for i := 0; i <= maxIPsPerUser; i++ {
+		us.addConn(fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256))
+	}
+
+	if got := len(us.ips); got != maxIPsPerUser {
+		t.Fatalf("tracked IPs = %d, want cap %d", got, maxIPsPerUser)
+	}
+	if us.connCount != maxIPsPerUser+1 {
+		t.Fatalf("connCount = %d, want %d", us.connCount, maxIPsPerUser+1)
+	}
+	// A connection beyond the cap still closes cleanly.
+	us.removeConn("11.11.11.11")
 }

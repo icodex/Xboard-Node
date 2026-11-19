@@ -33,10 +33,20 @@ type userStats struct {
 	connCount int            // total active connections
 }
 
-// addConn registers a new connection from sourceIP.
+// maxIPsPerUser bounds the per-user alive-IP set. It only matters for
+// unlimited users under address-spoofing load; real device counts are smaller.
+const maxIPsPerUser = 4096
+
+// addConn registers a new connection from sourceIP. Connections beyond the IP
+// cap still count toward connCount but are not tracked as alive IPs, so one
+// user cannot grow this map without bound.
 func (u *userStats) addConn(sourceIP string) {
 	u.mu.Lock()
 	u.connCount++
+	if _, tracked := u.ips[sourceIP]; !tracked && len(u.ips) >= maxIPsPerUser {
+		u.mu.Unlock()
+		return
+	}
 	u.ips[sourceIP]++
 	u.mu.Unlock()
 }

@@ -104,6 +104,10 @@ type Service struct {
 	// loop, and a bool was cleared too early in that window.
 	certWorkers    atomic.Int32
 	configDeferred atomic.Bool
+	// certDeferSince bounds how long config changes may wait for a cert
+	// reconfiguration; past it the config applies with the current cert and
+	// the cert update triggers another reload.
+	certDeferSince time.Time
 
 	// Certificate retry tuning. Zero values fall back to the production
 	// defaults, so tests can exercise the give-up path without waiting 30s.
@@ -1157,7 +1161,27 @@ func (s *Service) updateUserState(users []model.UserSpec) {
 	if users == nil {
 		users = []model.UserSpec{}
 	}
+	prev := append([]model.UserSpec(nil), s.lastUsers...)
 	_, _ = s.prepareUserState(users, "")
+	s.forgetRemovedUsers(prev, users)
+}
+
+// forgetRemovedUsers drops tracker baselines for users no longer registered.
+func (s *Service) forgetRemovedUsers(prev, next []model.UserSpec) {
+	if len(prev) == 0 {
+		return
+	}
+	keep := make(map[int]struct{}, len(next))
+	for _, u := range next {
+		keep[u.ID] = struct{}{}
+	}
+	ids := make([]int, 0, len(prev))
+	for _, u := range prev {
+		if _, ok := keep[u.ID]; !ok {
+			ids = append(ids, u.ID)
+		}
+	}
+	s.tracker.ForgetUsers(ids)
 }
 
 func (s *Service) prepareUserState(users []model.UserSpec, knownHash string) (prevUsers []model.UserSpec, prevHash string) {
@@ -1324,9 +1348,12 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 		nlog.Core().Warn(fmt.Sprintf("UpdateUsers failed, restarting kernel: %v", err))
 		if !s.startKernel(s.lastConfig, users) {
 			s.restoreUserState(prevUsers, prevHash)
+			return
 		}
+		s.forgetRemovedUsers(prevUsers, users)
 		return
 	}
+	s.forgetRemovedUsers(prevUsers, users)
 	if s.nodeLog != nil && (added > 0 || removed > 0) {
 		s.nodeLog.Info(fmt.Sprintf("users updated: +%d -%d", added, removed))
 	}
@@ -1409,6 +1436,13 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 				return
 			}
 		}
+		ids := make([]int, 0, len(deltaUsers))
+		for _, u := range deltaUsers {
+			if u.ID > 0 {
+				ids = append(ids, u.ID)
+			}
+		}
+		s.tracker.ForgetUsers(ids)
 		if s.nodeLog != nil && removed > 0 {
 			s.nodeLog.Info(fmt.Sprintf("users removed: -%d", removed))
 		}
@@ -1505,12 +1539,23 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	}
 
 	if s.certWorkers.Load() > 0 {
-		// A certificate reconfiguration is running; wait for the new material
-		// so the kernel loads once. The certUpdates handler replays this.
-		s.configDeferred.Store(true)
-		nlog.Core().Debug("config change deferred until certificate reconfiguration completes")
-		return
+		// A certificate reconfiguration is running; normally wait for the new
+		// material so the kernel loads once (the certUpdates handler replays
+		// this). A stuck ACME attempt must not block unrelated config changes
+		// indefinitely: after certDeferMax the config applies with the current
+		// certificate and the certificate update reloads again.
+		if s.certDeferSince.IsZero() {
+			s.certDeferSince = time.Now()
+		}
+		const certDeferMax = 2 * time.Minute
+		if time.Since(s.certDeferSince) < certDeferMax {
+			s.configDeferred.Store(true)
+			nlog.Core().Debug("config change deferred until certificate reconfiguration completes")
+			return
+		}
+		nlog.Core().Warn("certificate reconfiguration is taking too long; applying the config with the current certificate")
 	}
+	s.certDeferSince = time.Time{}
 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
 		if len(s.lastUsers) == 0 {

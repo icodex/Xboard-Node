@@ -304,3 +304,20 @@ func TestSpeed_ProcessIntervalRecorded(t *testing.T) {
 		t.Errorf("second cycle elapsed = %v, want real (0,10s]", s.processElapsed)
 	}
 }
+
+func TestForgetUsersDropsBaselines(t *testing.T) {
+	tr := New()
+	tr.Process(map[int][2]int64{1: {100, 200}, 2: {10, 20}}, nil, 0)
+	tr.ForgetUsers([]int{1})
+
+	tr.mu.Lock()
+	_, keep := tr.lastSeen[1]
+	_, kept := tr.lastSeen[2]
+	tr.mu.Unlock()
+	if keep {
+		t.Fatal("forgotten user baseline still present")
+	}
+	if !kept {
+		t.Fatal("unrelated user baseline removed")
+	}
+}

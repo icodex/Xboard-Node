@@ -103,7 +103,7 @@ func (c *Client) Handshake() (*HandshakeResponse, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("handshake status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("handshake status %d (%d-byte body)", resp.StatusCode, len(body))
 	}
 
 	var hs HandshakeResponse
@@ -242,7 +242,7 @@ func (c *Client) GetConfig() (*NodeConfig, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("status %d (%d-byte body)", resp.StatusCode, len(body))
 	}
 
 	var raw map[string]interface{}
@@ -280,7 +280,7 @@ func (c *Client) GetUsers() ([]User, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("status %d (%d-byte body)", resp.StatusCode, len(body))
 	}
 
 	// Weak decode like GetConfig: legacy panels send numbers as strings, and
@@ -311,7 +311,7 @@ func (c *Client) GetMachineNodes() (*MachineNodesResponse, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("machine nodes status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("machine nodes status %d (%d-byte body)", resp.StatusCode, len(body))
 	}
 
 	var out MachineNodesResponse
@@ -387,7 +387,7 @@ func (c *Client) postJSON(path string, payload map[string]interface{}) error {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+		return fmt.Errorf("status %d (%d-byte body)", resp.StatusCode, len(respBody))
 	}
 	c.apiSuccess.Add(1)
 	return nil

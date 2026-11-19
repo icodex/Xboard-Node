@@ -484,3 +484,19 @@ func TestUpdateLimitsSweepsIdleUnlimitedEntries(t *testing.T) {
 		t.Fatal("idle unlimited entry must be swept")
 	}
 }
+
+// Spoofed source addresses must not grow the unlimited-IP map without bound.
+func TestUnlimitedIPsCapped(t *testing.T) {
+	ld := newTestDispatcher()
+	email := userEmail(9)
+	ld.UpdateLimits(map[string]int{email: 9}, nil)
+
+	for i := 0; i <= maxUnlimitedIPsPerUser; i++ {
+		ld.checkDeviceLimit(email, fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256))
+	}
+
+	alive, _ := ld.GetConnectionState()
+	if got := len(alive[9]); got > maxUnlimitedIPsPerUser {
+		t.Fatalf("alive IPs = %d, want <= %d", got, maxUnlimitedIPsPerUser)
+	}
+}

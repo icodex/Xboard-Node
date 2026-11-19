@@ -21,6 +21,9 @@ type snapshot struct {
 	// previous one. Speeds are per-second over this interval, so a non-default
 	// track_interval still reports correct bytes/sec.
 	processElapsed time.Duration
+	// aliveHash is computed once per Process and shared by every flush
+	// consumer, instead of re-hashing the same snapshot per consumer.
+	aliveHash string
 }
 
 // Tracker computes per-user traffic deltas from cumulative counters
@@ -144,6 +147,7 @@ func (t *Tracker) Process(
 		inSpeed:        cycleIn,
 		outSpeed:       cycleOut,
 		processElapsed: elapsed,
+		aliveHash:      calcAliveIPsHash(kernelAliveIPs),
 	})
 }
 
@@ -192,15 +196,12 @@ func (t *Tracker) FlushAliveIPs(consumer string) map[int][]string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Calculate hash of current aliveIPs
-	currentHash := calcAliveIPsHash(s.aliveIPs)
-
-	// If no changes, return nil to avoid duplicate reporting
-	if currentHash == t.aliveHashes[consumer] {
+	// Process already hashed this snapshot once for all consumers.
+	if s.aliveHash == t.aliveHashes[consumer] {
 		return nil
 	}
 
-	t.aliveHashes[consumer] = currentHash
+	t.aliveHashes[consumer] = s.aliveHash
 
 	out := make(map[int][]string, len(s.aliveIPs))
 	for uid, ips := range s.aliveIPs {
@@ -211,6 +212,21 @@ func (t *Tracker) FlushAliveIPs(consumer string) map[int][]string {
 		out[uid] = list
 	}
 	return out
+}
+
+// ForgetUsers drops the cumulative-traffic baseline for users the panel
+// removed. Without it, lastSeen grows with every user ID the node has ever
+// served; a re-added ID would also compare against a baseline from its
+// previous kernel user and under-report until the counter catches up.
+func (t *Tracker) ForgetUsers(ids []int) {
+	if len(ids) == 0 {
+		return
+	}
+	t.mu.Lock()
+	for _, id := range ids {
+		delete(t.lastSeen, id)
+	}
+	t.mu.Unlock()
 }
 
 // MarkAliveIPsStale forces the next FlushAliveIPs to resend the snapshot to
