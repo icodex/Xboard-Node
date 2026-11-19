@@ -87,7 +87,9 @@ func sanitizePanelECHKeyPath(n *NodeSpec, configDir string) {
 }
 
 // pathUnderRoot reports whether path resolves inside root. allowRoot controls
-// whether root itself counts as inside.
+// whether root itself counts as inside. It fails closed for an empty root and
+// for the filesystem root: filepath.Abs("") is the process CWD (often "/"
+// under systemd), which would otherwise accept every panel path.
 func pathUnderRoot(path, root string, allowRoot bool) bool {
 	root = strings.TrimSpace(root)
 	path = strings.TrimSpace(path)
@@ -96,6 +98,9 @@ func pathUnderRoot(path, root string, allowRoot bool) bool {
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
+		return false
+	}
+	if rootAbs == string(filepath.Separator) {
 		return false
 	}
 	pathAbs, err := filepath.Abs(path)

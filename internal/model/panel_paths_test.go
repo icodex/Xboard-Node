@@ -120,3 +120,26 @@ func TestSanitizePanelECHKeyPath(t *testing.T) {
 		}
 	})
 }
+
+func TestPathUnderRootFailsClosed(t *testing.T) {
+	if pathUnderRoot("/etc/passwd", "", true) {
+		t.Fatal("empty root must fail closed")
+	}
+	if pathUnderRoot("/etc/passwd", "   ", true) {
+		t.Fatal("blank root must fail closed")
+	}
+	// filepath.Abs("") is the process CWD, which is often "/" under systemd;
+	// the filesystem root must never act as an allowlist.
+	if pathUnderRoot("/etc/passwd", "/", true) {
+		t.Fatal("filesystem root must fail closed")
+	}
+	if pathUnderRoot("/etc/xboard-node", "/etc/xboard-node", false) {
+		t.Fatal("config dir itself must not be a valid masquerade root")
+	}
+	if !pathUnderRoot("/etc/xboard-node/ech.key", "/etc/xboard-node", true) {
+		t.Fatal("file directly under the config dir must be allowed")
+	}
+	if pathUnderRoot("/etc/xboard-node/../secrets", "/etc/xboard-node", true) {
+		t.Fatal("traversal must be rejected")
+	}
+}

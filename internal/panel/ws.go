@@ -421,7 +421,9 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 		case msg := <-writeCh:
 			// Perform the actual network write asynchronously in this loop.
-			nlog.Core().Debug("ws send", "event", msg.Event, "data", string(msg.Data))
+			// Same rule as the read side: never print the body (device
+			// reports carry user IDs and IPs; status carries traffic data).
+			nlog.Core().Debug("ws send", "event", msg.Event, "data_len", len(msg.Data))
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteJSON(msg); err != nil {
 				return fmt.Errorf("write: %w", err)

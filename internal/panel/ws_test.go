@@ -545,10 +545,42 @@ func TestValidateWSURL(t *testing.T) {
 	}
 }
 
-// Debug logging must never dump the frame body: sync.config carries the TLS
-// private key and DNS tokens, sync.users carries user UUIDs (proxy passwords).
+// lockedBuffer makes log capture safe while the WS goroutines keep writing.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func waitForLog(t *testing.T, buf *lockedBuffer, needle string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), needle) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %q in logs: %s", needle, buf.String())
+}
+
+// Debug logging must never dump a frame body, in either direction:
+// sync.config carries the TLS private key and DNS tokens, sync.users carries
+// user UUIDs (proxy passwords), device reports carry user IDs and IPs.
 func TestWSClient_DebugLogOmitsFramePayload(t *testing.T) {
 	const secret = "SECRET-UUID-4f9c2a"
+	const deviceIP = "198.51.100.77"
 	usersData, _ := json.Marshal(syncUsersPayload{
 		Users:     []User{{ID: 7, UUID: secret}},
 		Timestamp: 1,
@@ -556,7 +588,7 @@ func TestWSClient_DebugLogOmitsFramePayload(t *testing.T) {
 	server := fakeWSServer(t, []wsMessage{{Event: WSEventSyncUsers, Data: usersData}})
 	defer server.Close()
 
-	var logs bytes.Buffer
+	var logs lockedBuffer
 	nlog.Init(&logs, slog.LevelDebug, false)
 	t.Cleanup(func() { nlog.Init(io.Discard, slog.LevelInfo, false) })
 
@@ -583,9 +615,16 @@ func TestWSClient_DebugLogOmitsFramePayload(t *testing.T) {
 		t.Fatal("timed out waiting for the users event")
 	}
 
+	// Send direction: device snapshots also flow through trySend -> writeCh.
+	ws.SendDeviceReport(map[int][]string{7: {deviceIP}})
+	waitForLog(t, &logs, "ws send")
+
 	out := logs.String()
 	if strings.Contains(out, secret) {
-		t.Fatalf("debug log leaked the frame payload: %s", out)
+		t.Fatalf("debug log leaked the received frame payload: %s", out)
+	}
+	if strings.Contains(out, deviceIP) {
+		t.Fatalf("debug log leaked the sent device payload: %s", out)
 	}
 	if !strings.Contains(out, "data_len") {
 		t.Fatalf("expected data_len in ws debug log, got: %s", out)
