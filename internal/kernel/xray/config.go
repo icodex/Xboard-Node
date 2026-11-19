@@ -930,7 +930,7 @@ func compileRouteMatch(match model.RouteMatch, outbound string) (M, bool) {
 		matched = true
 	}
 	if len(match.Ports) > 0 {
-		entry["port"] = strings.Join(match.Ports, ",")
+		entry["port"] = xrayPortSpecs(match.Ports)
 		matched = true
 	}
 	if len(match.Networks) > 0 {
@@ -942,7 +942,7 @@ func compileRouteMatch(match model.RouteMatch, outbound string) (M, bool) {
 		matched = true
 	}
 	if len(match.SourcePorts) > 0 {
-		entry["sourcePort"] = strings.Join(match.SourcePorts, ",")
+		entry["sourcePort"] = xrayPortSpecs(match.SourcePorts)
 		matched = true
 	}
 
@@ -950,6 +950,22 @@ func compileRouteMatch(match model.RouteMatch, outbound string) (M, bool) {
 		return nil, false
 	}
 	return entry, true
+}
+
+// xrayPortSpecs renders a validated panel port list for xray's PortList
+// parser, which splits ranges on "-" only. validatePortSpecs accepts the
+// documented "a:b" spelling, and letting it through made xray reject the
+// whole config ("invalid port").
+func xrayPortSpecs(values []string) string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, strings.ReplaceAll(value, ":", "-"))
+	}
+	return strings.Join(out, ",")
 }
 
 func xrayRouteDomains(match model.RouteMatch) []string {

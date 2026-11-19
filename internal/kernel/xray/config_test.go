@@ -407,10 +407,10 @@ func TestBuildRouting_WithCustomRouteRules(t *testing.T) {
 			Match: model.RouteMatch{
 				Domains:        []string{"full.example.com"},
 				DomainSuffixes: []string{"example.org"},
-				Ports:          []string{"80", "443-445"},
+				Ports:          []string{"80", "443:445"},
 				Networks:       []string{"tcp", "udp"},
 				SourceCIDRs:    []string{"192.168.1.0/24"},
-				SourcePorts:    []string{"1000-1002"},
+				SourcePorts:    []string{"1000:1002"},
 			},
 			Action: model.RouteAction{Type: "route", Target: "warp-jp"},
 		},
