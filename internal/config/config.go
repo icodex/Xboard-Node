@@ -886,13 +886,16 @@ func (c *Config) ExpandNodes() []*Config {
 			nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
 		}
 
-		// Per-node cert overrides. Nodes that inherit the top-level cert config
-		// share one domain (and therefore one directory, so the certificate is
-		// issued once); an explicit per-node block gets its own derived dir.
+		// Per-node cert overrides. Nodes that inherit a top-level cert identity
+		// (non-empty domain) intentionally share one directory so the
+		// certificate is issued once; every other node gets its own derived
+		// dir, including the case where the inherited cert_dir is only the
+		// base config_dir default (otherwise all nodes share one privkey.pem).
 		if entry.Cert != nil {
 			nodeCfg.Cert = *entry.Cert
 		}
-		if nodeCfg.Cert.CertDir == "" {
+		baseDefaultCertDir := filepath.Join(c.Kernel.ConfigDir, "certs")
+		if nodeCfg.Cert.CertDir == "" || (entry.Cert == nil && strings.TrimSpace(nodeCfg.Cert.Domain) == "" && nodeCfg.Cert.CertDir == baseDefaultCertDir) {
 			nodeCfg.Cert.CertDir = filepath.Join(nodeCfg.Kernel.ConfigDir, "certs")
 		}
 

@@ -164,3 +164,41 @@ func TestMachineControlPlaneInitialBackfillsIntervalsFromBaseConfig(t *testing.T
 		t.Fatalf("intervals = %d/%d, want 300/120", boot.PushInterval, boot.PullInterval)
 	}
 }
+
+// A 304 on the config endpoint must not dereference the nil snapshot; users
+// still apply and sanitization uses the last known protocol.
+func TestPanelControlPlanePollHandlesNotModified(t *testing.T) {
+	requests := 0
+	var mux http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/user"):
+			_, _ = w.Write([]byte(`{"users":[{"id":1,"uuid":"f915f880-dc96-4a41-81d9-5f43ef0fbc6a"}]}`))
+		default:
+			requests++
+			if requests == 1 {
+				w.Header().Set("ETag", `"v1"`)
+				_, _ = w.Write([]byte(`{"protocol":"vless","server_port":443}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotModified)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cp := NewPanelControlPlane(config.PanelConfig{URL: server.URL, Token: "token", NodeID: 1}, config.WSConfig{}, config.KernelConfig{Type: "singbox"})
+	first, err := cp.Poll(context.Background())
+	if err != nil || first.Config == nil {
+		t.Fatalf("first poll: cfg=%v err=%v", first.Config, err)
+	}
+	second, err := cp.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	if second.Config != nil {
+		t.Fatal("304 should leave Config nil")
+	}
+	if len(second.Users) != 1 {
+		t.Fatalf("users = %v", second.Users)
+	}
+}

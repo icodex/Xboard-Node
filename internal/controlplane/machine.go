@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/model"
@@ -20,6 +21,9 @@ type MachinePanelControlPlane struct {
 	push   PushClient // virtual push client from WS mux (may be nil)
 
 	registerFn func(statuses chan<- StatusChange) *NodeMailbox
+
+	lastMu       sync.Mutex
+	lastProtocol string
 }
 
 // NewMachinePanelControlPlane creates a per-node control plane for machine mode.
@@ -109,13 +113,24 @@ func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, ctx.Err()
 	default:
 	}
-	nodeSpec, err := model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("machine poll normalize: %w", err)
+	// 304 responses yield a nil config snapshot; never dereference it.
+	var nodeSpec *model.NodeSpec
+	p.lastMu.Lock()
+	protocol := p.lastProtocol
+	p.lastMu.Unlock()
+	if configSnapshot != nil {
+		nodeSpec, err = model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("machine poll normalize: %w", err)
+		}
+		protocol = nodeSpec.Protocol
+		p.lastMu.Lock()
+		p.lastProtocol = protocol
+		p.lastMu.Unlock()
 	}
 	return Snapshot{
 		Config: nodeSpec,
-		Users:  model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(nodeSpec.Protocol)),
+		Users:  model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(protocol)),
 	}, nil
 }
 

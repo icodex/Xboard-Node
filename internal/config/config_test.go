@@ -646,6 +646,23 @@ func TestInheritFrom_AutoTLSInheritedWhenChildHasNoCertConfig(t *testing.T) {
 	}
 }
 
+// Nodes without a cert identity must not inherit the base default cert dir:
+// sharing it failed startup layout validation with an empty domain.
+func TestExpandNodes_DefaultCertDirIsPerNode(t *testing.T) {
+	cfg := &Config{
+		Kernel: KernelConfig{ConfigDir: "/tmp/base", GeoDataDir: "/tmp/base"},
+		Cert:   CertConfig{CertDir: "/tmp/base/certs"}, // defaulted base dir, no domain
+		Nodes:  []NodeEntry{{NodeID: 1}, {NodeID: 2}},
+	}
+	nodes := cfg.ExpandNodes()
+	if nodes[0].Cert.CertDir != "/tmp/base/node-1/certs" || nodes[1].Cert.CertDir != "/tmp/base/node-2/certs" {
+		t.Fatalf("cert dirs = %q, %q", nodes[0].Cert.CertDir, nodes[1].Cert.CertDir)
+	}
+	if err := ValidateStartupLayout(nodes); err != nil {
+		t.Fatalf("ValidateStartupLayout: %v", err)
+	}
+}
+
 // A node that only overrides e.g. log_level must still get its own config_dir;
 // sharing the base dir made ValidateStartupLayout abort the whole daemon.
 func TestExpandNodes_DerivesUniqueConfigDirWithKernelOverride(t *testing.T) {

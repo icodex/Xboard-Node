@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -16,6 +17,9 @@ type PanelControlPlane struct {
 	wsCfg  config.WSConfig
 	kcfg   config.KernelConfig
 	client *panel.Client
+
+	lastMu       sync.Mutex
+	lastProtocol string
 }
 
 type panelPushClient struct {
@@ -107,13 +111,26 @@ func (p *PanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, ctx.Err()
 	default:
 	}
-	nodeSpec, err := model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("poll config normalize: %w", err)
+	// A 304 means the panel config is unchanged; GetConfig returns nil. Keep
+	// the last protocol so user sanitization stays correct (and never
+	// dereference a nil snapshot).
+	var nodeSpec *model.NodeSpec
+	p.lastMu.Lock()
+	protocol := p.lastProtocol
+	p.lastMu.Unlock()
+	if configSnapshot != nil {
+		nodeSpec, err = model.NodeSpecFromPanelValidated(configSnapshot, p.kcfg)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("poll config normalize: %w", err)
+		}
+		protocol = nodeSpec.Protocol
+		p.lastMu.Lock()
+		p.lastProtocol = protocol
+		p.lastMu.Unlock()
 	}
 	return Snapshot{
 		Config: nodeSpec,
-		Users:  model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(nodeSpec.Protocol)),
+		Users:  model.SanitizeUserSpecs(model.UserSpecsFromPanel(users), model.ProtocolRequiresUUID(protocol)),
 	}, nil
 }
 
