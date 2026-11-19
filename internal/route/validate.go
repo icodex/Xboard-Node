@@ -22,7 +22,8 @@ import (
 //     cannot parse these keys.
 //   - unknown: dropped with the offending keys listed.
 //
-// availableTags maps lowercased tags; a nil map skips the membership check.
+// availableTags holds outbound tags exactly as they are rendered; both kernels
+// match tag references case-sensitively. A nil map skips the membership check.
 func SanitizeRules(rules []map[string]any, kernelType string, availableTags map[string]struct{}, field string) (kept []map[string]any, keptIdx []int, issues []string) {
 	kernelType = strings.ToLower(strings.TrimSpace(kernelType))
 	kept = make([]map[string]any, 0, len(rules))
@@ -107,7 +108,8 @@ func checkTag(tag string, availableTags map[string]struct{}) error {
 	if availableTags == nil {
 		return nil
 	}
-	if _, ok := availableTags[strings.ToLower(strings.TrimSpace(tag))]; !ok {
+	// Exact case: the kernel resolves references without folding case.
+	if _, ok := availableTags[strings.TrimSpace(tag)]; !ok {
 		return fmt.Errorf("outboundTag references unknown outbound %q", tag)
 	}
 	return nil

@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -144,6 +145,45 @@ func NewWSClient(wsURL string, token string, nodeID int, cfg WSClientConfig, onE
 
 func (w *WSClient) IsConnected() bool { return w.connected.Load() }
 
+// ValidateWSURL checks a panel-supplied ws_url against the configured panel
+// base URL. The panel decides where the node dials, and the node appends its
+// token to that URL, so a tampered handshake response (plaintext panel, hostile
+// proxy) would otherwise hand the token to an arbitrary host.
+//
+// Rules: scheme must be ws/wss and must not downgrade an https panel to ws,
+// the URL must not carry userinfo, and the host must match the panel host
+// (the port may differ: Workerman often listens on its own port).
+func ValidateWSURL(wsURL, panelURL string) error {
+	base, err := url.Parse(strings.TrimSpace(panelURL))
+	if err != nil {
+		return fmt.Errorf("invalid panel.url: %w", err)
+	}
+	if base.Hostname() == "" {
+		return fmt.Errorf("invalid panel.url: missing host")
+	}
+	target, err := url.Parse(strings.TrimSpace(wsURL))
+	if err != nil {
+		return fmt.Errorf("invalid ws_url: %w", err)
+	}
+	if target.User != nil {
+		return fmt.Errorf("ws_url must not carry userinfo")
+	}
+	scheme := strings.ToLower(target.Scheme)
+	switch scheme {
+	case "ws":
+		if strings.EqualFold(base.Scheme, "https") {
+			return fmt.Errorf("ws_url %q downgrades the https panel to plaintext ws", target.Redacted())
+		}
+	case "wss":
+	default:
+		return fmt.Errorf("ws_url scheme %q is not ws/wss", target.Scheme)
+	}
+	if !strings.EqualFold(target.Hostname(), base.Hostname()) {
+		return fmt.Errorf("ws_url host %q does not match panel host %q", target.Hostname(), base.Hostname())
+	}
+	return nil
+}
+
 func (w *WSClient) notifyStatus(connected bool) {
 	if w.onStatus != nil {
 		w.onStatus(WSStatusChange{Connected: connected})
@@ -180,7 +220,7 @@ func (w *WSClient) Run(ctx context.Context) {
 		}
 
 		// Apply exponential backoff with jitter to prevent thundering herd.
-		jitter := time.Duration(rand.Int63n(int64(backoff / 5)))
+		jitter := time.Duration(rand.Int64N(int64(backoff / 5)))
 		wait := backoff + jitter
 
 		timer := time.NewTimer(wait)
@@ -210,7 +250,8 @@ func (w *WSClient) connect(ctx context.Context) error {
 	}
 	u.RawQuery = q.Encode()
 
-	nlog.Core().Debug("ws connecting", "url", u.String())
+	// Never log the URL: its query carries the panel token.
+	nlog.Core().Debug("ws connecting", "host", u.Host, "path", u.Path)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: w.cfg.HandshakeTimeout,
@@ -437,32 +478,38 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 
 	case WSEventSyncUsers:
 		nlog.Core().Debug("ws sync users event received")
-		var raw map[string]interface{}
-		if err := json.Unmarshal(msg.Data, &raw); err != nil {
-			nlog.Core().Warn("ws: cannot decode users payload", "error", err)
-			return
-		}
 		// A present but empty array is valid: it removes every user (all
 		// expired or deleted). Only an array replaces the user set; a missing
 		// or null field is ignored, matching the REST path where nil means
 		// "no change". Dropping an empty list used to leave old credentials
 		// active, because REST polling is skipped while the WS is connected.
-		rawUsers, ok := raw["users"]
-		if !ok {
-			nlog.Core().Warn("ws: users payload missing")
-			return
-		}
-		if _, isArray := rawUsers.([]interface{}); !isArray {
-			nlog.Core().Warn("ws: users payload is not an array, ignoring")
-			return
-		}
 		var p syncUsersPayload
-		if err := decodeWeakRaw(raw, &p); err != nil {
-			nlog.Core().Warn("ws: cannot decode users payload", "error", err)
-			return
+		if err := json.Unmarshal(msg.Data, &p); err != nil {
+			// Slow path for legacy panels that send numbers as strings: the
+			// weak decoder needs the whole payload as a generic map, which is
+			// the memory blow-up this strict pass avoids for normal payloads.
+			var raw map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &raw); err != nil {
+				nlog.Core().Warn("ws: cannot decode users payload", "error", err)
+				return
+			}
+			rawUsers, ok := raw["users"]
+			if !ok {
+				nlog.Core().Warn("ws: users payload missing")
+				return
+			}
+			if _, isArray := rawUsers.([]interface{}); !isArray {
+				nlog.Core().Warn("ws: users payload is not an array, ignoring")
+				return
+			}
+			if err := decodeWeakRaw(raw, &p); err != nil {
+				nlog.Core().Warn("ws: cannot decode users payload", "error", err)
+				return
+			}
 		}
 		if p.Users == nil {
-			p.Users = []User{}
+			nlog.Core().Warn("ws: users payload missing")
+			return
 		}
 		event.Users = p.Users
 		event.NodeID = p.NodeID
@@ -550,23 +597,6 @@ func (w *WSClient) SendDeviceReportForNode(nodeID int, devices map[int][]string)
 	}
 
 	w.trySend(msg, "device report")
-}
-
-// SendNodeStatus sends a node.status event with the given node_id (machine mode).
-func (w *WSClient) SendNodeStatus(nodeID int, stats map[string]interface{}) {
-	if !w.connected.Load() || stats == nil {
-		return
-	}
-	if nodeID > 0 {
-		stats["node_id"] = nodeID
-	}
-	data, _ := json.Marshal(stats)
-	msg := wsMessage{
-		Event:     "node.status",
-		Data:      data,
-		Timestamp: time.Now().Unix(),
-	}
-	w.trySend(msg, "node status")
 }
 
 // SendRaw sends a raw message to the panel via WebSocket.

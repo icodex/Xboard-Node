@@ -8,6 +8,15 @@ import (
 	ob "github.com/cedar2025/xboard-node/internal/outbound"
 )
 
+// dialerProxyRef is one sockopt.dialerProxy reference collected during the
+// first pass, checked once every outbound tag is known (forward references are
+// legal, self references are not).
+type dialerProxyRef struct {
+	index int
+	tag   string
+	ref   string
+}
+
 func ValidateCustomOutboundsForKernel(outbounds []OutboundConfig, kernelType string, additionalTags []string) error {
 	if len(outbounds) == 0 {
 		return nil
@@ -29,8 +38,9 @@ func ValidateCustomOutboundsForKernel(outbounds []OutboundConfig, kernelType str
 	availableTags := make(map[string]struct{}, len(outbounds)+len(additionalTags)+2)
 	availableTags["direct"] = struct{}{}
 	availableTags["block"] = struct{}{}
+	var dialerRefs []dialerProxyRef
 	for _, tag := range additionalTags {
-		tag = strings.ToLower(strings.TrimSpace(tag))
+		tag = strings.TrimSpace(tag)
 		if tag != "" {
 			availableTags[tag] = struct{}{}
 		}
@@ -65,22 +75,41 @@ func ValidateCustomOutboundsForKernel(outbounds []OutboundConfig, kernelType str
 			return fmt.Errorf("custom_outbounds[%d].tag duplicates %q", i, tag)
 		}
 		seen[key] = struct{}{}
-		availableTags[key] = struct{}{}
+		availableTags[tag] = struct{}{}
+		if canonical.Stream != nil {
+			if ref := strings.TrimSpace(canonical.Stream.DialerProxy); ref != "" {
+				dialerRefs = append(dialerRefs, dialerProxyRef{index: i, tag: tag, ref: ref})
+			}
+		}
 	}
 
 	for i, outbound := range outbounds {
 		if outbound.ProxyTag == "" {
 			continue
 		}
-		proxyTag := strings.ToLower(strings.TrimSpace(outbound.ProxyTag))
+		proxyTag := strings.TrimSpace(outbound.ProxyTag)
 		if proxyTag == "" {
 			return fmt.Errorf("custom_outbounds[%d].proxy_tag must not be blank", i)
 		}
-		if proxyTag == strings.ToLower(strings.TrimSpace(outbound.Tag)) {
+		if proxyTag == strings.TrimSpace(outbound.Tag) {
 			return fmt.Errorf("custom_outbounds[%d].proxy_tag must not reference itself", i)
 		}
+		// Tags are rendered with their original case and both kernels match
+		// references exactly, so compare without folding case.
 		if _, exists := availableTags[proxyTag]; !exists {
 			return fmt.Errorf("custom_outbounds[%d].proxy_tag references unknown outbound %q", i, outbound.ProxyTag)
+		}
+	}
+
+	// sockopt.dialerProxy is the other tag reference the builders write
+	// verbatim (sing-box "detour", xray "sockopt.dialerProxy"). An unknown or
+	// self reference makes kernel config parsing fail.
+	for _, ref := range dialerRefs {
+		if ref.ref == ref.tag {
+			return fmt.Errorf("custom_outbounds[%d] (%s): sockopt.dialerProxy must not reference itself", ref.index, ref.tag)
+		}
+		if _, exists := availableTags[ref.ref]; !exists {
+			return fmt.Errorf("custom_outbounds[%d] (%s): sockopt.dialerProxy references unknown outbound %q", ref.index, ref.tag, ref.ref)
 		}
 	}
 

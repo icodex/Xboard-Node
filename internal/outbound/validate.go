@@ -21,6 +21,31 @@ var xrayUnsupportedNetworks = map[string]bool{
 	"quic": true,
 }
 
+// SingboxUnsupportedNetwork reports whether the embedded sing-box kernel
+// cannot parse the given transport. Single source of truth: the model layer
+// selects and validates kernels through these predicates.
+func SingboxUnsupportedNetwork(network string) bool {
+	return singboxUnsupportedNetworks[normalizeNetwork(network)]
+}
+
+// XrayUnsupportedNetwork reports whether the pinned xray-core fork cannot
+// parse the given transport.
+func XrayUnsupportedNetwork(network string) bool {
+	return xrayUnsupportedNetworks[normalizeNetwork(network)]
+}
+
+// NetworkUnsupportedByBoth reports transports neither kernel can serve. Such a
+// node must be rejected at validation time instead of silently resolving to
+// one kernel and failing to start.
+func NetworkUnsupportedByBoth(network string) bool {
+	net := normalizeNetwork(network)
+	return singboxUnsupportedNetworks[net] && xrayUnsupportedNetworks[net]
+}
+
+func normalizeNetwork(network string) string {
+	return strings.ToLower(strings.TrimSpace(network))
+}
+
 var singboxOnlyProtocols = map[string]bool{
 	"tuic":      true,
 	"hysteria2": true,
@@ -150,7 +175,7 @@ func validateStream(c *Canonical, kernel string) error {
 
 	switch kernel {
 	case "singbox":
-		if singboxUnsupportedNetworks[network] {
+		if SingboxUnsupportedNetwork(network) {
 			return fmt.Errorf("streamSettings.network %q is not supported by the sing-box kernel; use kernel xray", network)
 		}
 		switch security {
@@ -170,7 +195,7 @@ func validateStream(c *Canonical, kernel string) error {
 			return fmt.Errorf("vless flow %q requires tls or reality", c.Flow)
 		}
 	case "xray":
-		if xrayUnsupportedNetworks[network] {
+		if XrayUnsupportedNetwork(network) {
 			return fmt.Errorf("streamSettings.network %q is not supported by the xray kernel (removed upstream); use sing-box kernel", network)
 		}
 		if security == "reality" && !c.nestedXray && stream.RealityPublicKey == "" {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -37,9 +38,6 @@ import (
 )
 
 const (
-	// drainTimeout is how long Stop waits for in-flight connections to finish
-	// before hard-killing the instance. Skipped during hot-reload for speed.
-	drainTimeout = 5 * time.Second
 	// startTimeout caps how long instance.Start() may block.
 	startTimeout = 30 * time.Second
 )
@@ -142,8 +140,6 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 
 	// ── Phase 4: Swap old → new (brief kernel lock) ─────────────────────
 	x.mu.Lock()
-	old := x.instance
-	oldLD := x.limitDispatcher
 	x.instance = inst
 	x.limitDispatcher = ld
 	x.users = users
@@ -155,9 +151,6 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 	x.lastKernelHash = kernel.ComputeHash(nodeConfig, users)
 	x.running.Store(true)
 	x.mu.Unlock()
-
-	// ── Phase 5: Recycle old (background, non-blocking) ─────────────────
-	closeOld(old, oldLD)
 
 	x.updateDispatcherLimits(users)
 	x.updateBandwidthLimits(users)
@@ -193,21 +186,15 @@ func (x *Xray) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ke
 	return x.Start(nodeConfig, users, tls)
 }
 
-// Stop gracefully shuts down the kernel, draining active connections first.
+// Stop shuts down the kernel and frees its listening ports immediately.
+//
+// It deliberately does not drain: the previous version drained for 5s and then
+// handed Close() to a background goroutine that waited up to 5 more minutes,
+// so the listeners stayed open the whole time. Any kernel started next (auto
+// switch, user set cleared then restored, process reload) failed to bind with
+// EADDRINUSE while the old instance kept serving stale credentials.
 func (x *Xray) Stop() {
-	x.running.Store(false)
-
-	x.mu.Lock()
-	inst := x.instance
-	ld := x.limitDispatcher
-	x.instance = nil
-	x.limitDispatcher = nil
-	x.mu.Unlock()
-
-	if ld != nil {
-		drainConns(ld, drainTimeout)
-	}
-	closeOld(inst, ld)
+	x.stopNow()
 }
 
 // stopNow closes the running instance immediately, without draining: used when
@@ -358,14 +345,17 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 
 	ctx := context.Background()
 	added := 0
+	var failed []error
 	for _, u := range toAdd {
 		mu, err := toMemoryUser(proto, nc, u)
 		if err != nil {
 			nlog.Core().Warn("xray: skip user, cannot build account", "user", u.ID, "error", err)
+			failed = append(failed, fmt.Errorf("user %d: %w", u.ID, err))
 			continue
 		}
 		if err := um.AddUser(ctx, mu); err != nil {
 			nlog.Core().Warn("xray: AddUser failed", "user", u.ID, "error", err)
+			failed = append(failed, fmt.Errorf("user %d: %w", u.ID, err))
 			continue
 		}
 		added++
@@ -379,6 +369,12 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 	x.updateBandwidthLimits(merged)
 
 	nlog.Core().Info("xray: users added via UserManager", "added", added, "total", len(merged))
+	if len(failed) > 0 {
+		// Report the failure: the service then rebuilds from the full list,
+		// which converges the kernel instead of leaving the panel believing a
+		// user exists while xray has no account for it.
+		return added, fmt.Errorf("%d of %d users could not be added: %w", len(failed), len(toAdd), errors.Join(failed...))
+	}
 	return added, nil
 }
 
@@ -431,10 +427,12 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 
 	ctx := context.Background()
 	actualRemoved := 0
+	var failed []error
 	for _, u := range users {
 		email := userEmail(u.ID)
 		if err := um.RemoveUser(ctx, email); err != nil {
 			nlog.Core().Debug("xray: RemoveUser skipped", "user", u.ID, "error", err)
+			failed = append(failed, fmt.Errorf("user %d: %w", u.ID, err))
 			continue
 		}
 		actualRemoved++
@@ -447,6 +445,11 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 	x.updateBandwidthLimits(kept)
 
 	nlog.Core().Info("xray: users removed via UserManager", "removed", actualRemoved, "total", len(kept))
+	if len(failed) > 0 {
+		// A user the panel revoked may still hold a working credential in
+		// xray-core; the caller must know so it can rebuild.
+		return actualRemoved, fmt.Errorf("%d of %d users could not be removed: %w", len(failed), len(users), errors.Join(failed...))
+	}
 	return actualRemoved, nil
 }
 
@@ -494,22 +497,26 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 	x.mu.Unlock()
 
 	ctx := context.Background()
+	var failed []error
 
 	// Remove first, then add (order matters for UUID changes on same ID)
 	for _, u := range toRemove {
 		email := userEmail(u.ID)
 		if err := um.RemoveUser(ctx, email); err != nil {
 			nlog.Core().Debug("xray: RemoveUser skipped in UpdateUsers", "user", u.ID, "error", err)
+			failed = append(failed, fmt.Errorf("remove user %d: %w", u.ID, err))
 		}
 	}
 	for _, u := range toAdd {
 		mu, err := toMemoryUser(proto, nc, u)
 		if err != nil {
 			nlog.Core().Warn("xray: skip user in UpdateUsers", "user", u.ID, "error", err)
+			failed = append(failed, fmt.Errorf("add user %d: %w", u.ID, err))
 			continue
 		}
 		if err := um.AddUser(ctx, mu); err != nil {
 			nlog.Core().Warn("xray: AddUser failed in UpdateUsers", "user", u.ID, "error", err)
+			failed = append(failed, fmt.Errorf("add user %d: %w", u.ID, err))
 		}
 	}
 
@@ -520,6 +527,10 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 	x.updateBandwidthLimits(users)
 
 	nlog.Core().Info("xray: users updated via UserManager", "added", added, "removed", removed, "total", len(users))
+	if len(failed) > 0 {
+		// Partial application: the caller rebuilds from the full list.
+		return added, removed, fmt.Errorf("%d user operation(s) failed: %w", len(failed), errors.Join(failed...))
+	}
 	return
 }
 
@@ -710,41 +721,6 @@ func startWithTimeout(inst *xrayCore.Instance, timeout time.Duration) error {
 	case <-time.After(timeout):
 		go inst.Close()
 		return fmt.Errorf("start xray: timeout after %v", timeout)
-	}
-}
-
-// closeOld shuts down a previously running instance and its dispatcher.
-// Recycling happens in a background goroutine to prevent the main thread
-// from blocking on slow connection draining, enabling "hitless" reload.
-func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
-	if inst == nil {
-		return
-	}
-	go func() {
-		// 1. Drain connections gracefully (best effort, e.g. 5 minutes)
-		// We use a much longer timeout here than the default Stop() because
-		// it's running in background and doesn't block new user connections.
-		if ld != nil {
-			drainConns(ld, 5*time.Minute)
-		}
-		// 2. Hard close
-		inst.Close()
-		if ld != nil {
-			ld.ResetConns()
-		}
-		nlog.Core().Debug("xray: old instance recycled")
-	}()
-}
-
-// drainConns waits up to timeout for the dispatcher's active connections to
-// reach zero. Used only during graceful Stop, not during hot-reload.
-func drainConns(ld *LimitDispatcher, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if ld.connCount.Load() == 0 {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 

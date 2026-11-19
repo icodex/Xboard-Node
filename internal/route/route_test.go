@@ -240,19 +240,21 @@ func TestDetectForm(t *testing.T) {
 
 func TestSanitizeRules_XrayForm(t *testing.T) {
 	tags := map[string]struct{}{"proxy": {}}
-	good := map[string]any{"type": "field", "network": "tcp", "outboundTag": "PROXY"}
+	good := map[string]any{"type": "field", "network": "tcp", "outboundTag": "proxy"}
 	badTag := map[string]any{"type": "field", "network": "tcp", "outboundTag": "nope"}
+	// Kernels match tags exactly, so "PROXY" cannot resolve "proxy".
+	mixedCase := map[string]any{"type": "field", "network": "tcp", "outboundTag": "PROXY"}
 	badKey := map[string]any{"type": "field", "balancerTag": "b", "outboundTag": "proxy"}
 
-	kept, _, issues := SanitizeRules([]map[string]any{good, badTag, badKey}, "singbox", tags, "custom_routes")
+	kept, _, issues := SanitizeRules([]map[string]any{good, badTag, badKey, mixedCase}, "singbox", tags, "custom_routes")
 	if len(kept) != 1 || !reflect.DeepEqual(kept[0], good) {
 		t.Fatalf("kept: want [good], got %v", kept)
 	}
-	if len(issues) != 2 {
-		t.Fatalf("issues: want 2, got %v", issues)
+	if len(issues) != 3 {
+		t.Fatalf("issues: want 3, got %v", issues)
 	}
 	joined := strings.Join(issues, "\n")
-	if !strings.Contains(joined, `unknown outbound "nope"`) || !strings.Contains(joined, "balancerTag") {
+	if !strings.Contains(joined, `unknown outbound "nope"`) || !strings.Contains(joined, "balancerTag") || !strings.Contains(joined, `unknown outbound "PROXY"`) {
 		t.Fatalf("issue text mismatch: %v", issues)
 	}
 

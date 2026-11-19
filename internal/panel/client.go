@@ -3,6 +3,7 @@ package panel
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,12 @@ import (
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/go-viper/mapstructure/v2"
 )
+
+// maxResponseBytes caps one panel response body. The panel is trusted, but a
+// buggy or hostile response must not grow the decoder without bound: one
+// process hosts every node instance, so an unbounded document is an OOM for
+// all of them. The WS side already limits messages to 10 MiB.
+const maxResponseBytes = 64 << 20
 
 var (
 	trafficMapPool = sync.Pool{New: func() interface{} { return make(map[string][2]int64) }}
@@ -96,7 +103,7 @@ func (c *Client) Handshake() (*HandshakeResponse, error) {
 	}
 
 	var hs HandshakeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&hs); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&hs); err != nil {
 		return nil, fmt.Errorf("decode handshake: %w", err)
 	}
 	return &hs, nil
@@ -232,7 +239,7 @@ func (c *Client) GetConfig() (*NodeConfig, error) {
 	}
 
 	var raw map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode raw config: %w", err)
 	}
 
@@ -270,7 +277,7 @@ func (c *Client) GetUsers() ([]User, error) {
 	}
 
 	var usersResp UsersResponse
-	if err := json.NewDecoder(resp.Body).Decode(&usersResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&usersResp); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 
@@ -278,12 +285,6 @@ func (c *Client) GetUsers() ([]User, error) {
 		c.userETag = etag
 	}
 	return usersResp.Users, nil
-}
-
-// ResetETags clears cached ETags, forcing full responses
-func (c *Client) ResetETags() {
-	c.configETag = ""
-	c.userETag = ""
 }
 
 // GetMachineNodes fetches the list of active nodes bound to this machine.
@@ -300,7 +301,7 @@ func (c *Client) GetMachineNodes() (*MachineNodesResponse, error) {
 	}
 
 	var out MachineNodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode machine nodes: %w", err)
 	}
 	return &out, nil
@@ -409,6 +410,12 @@ func (c *Client) doRequest(method, path string, body []byte, ifNoneMatch string)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.apiFailure.Add(1)
+		// GET URLs carry the panel token in the query string; *url.Error keeps
+		// the full URL and the text is logged at Error level further up.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("%s %s: %w", method, path, ue.Err)
+		}
 		return nil, err
 	}
 

@@ -83,3 +83,25 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 		}
 	})
 }
+
+func TestSanitizePanelDNSEnv_DropsEndpointOverrides(t *testing.T) {
+	out := sanitizePanelDNSEnv(map[string]string{
+		"NAMECHEAP_API_KEY":      "k",
+		"NAMECHEAP_API_ENDPOINT": "http://10.0.0.5:8080/",
+		"OVH_ENDPOINT":           "ovh-eu",
+		"CLOUDFLARE_API_TOKEN":   "t",
+		"SOME_PROVIDER_BASE_URL": "http://metadata/",
+	})
+	if _, ok := out["NAMECHEAP_API_ENDPOINT"]; ok {
+		t.Fatal("endpoint override must be dropped")
+	}
+	if _, ok := out["OVH_ENDPOINT"]; ok {
+		t.Fatal("endpoint override must be dropped")
+	}
+	if _, ok := out["SOME_PROVIDER_BASE_URL"]; ok {
+		t.Fatal("url override must be dropped")
+	}
+	if out["NAMECHEAP_API_KEY"] != "k" || out["CLOUDFLARE_API_TOKEN"] != "t" {
+		t.Fatalf("credentials must be kept: %v", out)
+	}
+}

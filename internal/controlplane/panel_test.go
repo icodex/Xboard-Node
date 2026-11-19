@@ -81,6 +81,9 @@ func TestTranslateWSEventRejectsUnsupportedProtocolForKernel(t *testing.T) {
 		Config: &panelapi.NodeConfig{
 			Protocol:   "shadowsocks",
 			ServerPort: 8388,
+			// A valid AEAD cipher keeps the xray cipher gate from firing first;
+			// this test asserts the custom-outbound protocol check.
+			Cipher: "aes-256-gcm",
 			CustomOutbounds: []panelapi.OutboundConfig{
 				{Tag: "hy2", Protocol: "hysteria2", Settings: map[string]any{"server": "2.2.2.2", "server_port": 8443}},
 			},

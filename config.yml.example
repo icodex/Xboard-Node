@@ -101,6 +101,9 @@ log:
 #   backoff_initial: 1       # initial reconnect delay
 #   backoff_max: 60          # max reconnect delay
 #   discovery_interval: 300  # periodic re-handshake / discovery
+# The panel supplies the WS address in the handshake. Its host must match
+# panel.url (the port may differ); a mismatched or plaintext-downgraded
+# ws_url is rejected and the node stays on REST polling.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GO RUNTIME TUNING
@@ -110,6 +113,7 @@ log:
 #   gogc: 50             # lower GC target: less memory, slightly more CPU
 
 # Health-check endpoint on this port (0 = disabled, default).
+# Bound to 127.0.0.1 only; probe it from the node itself (xbctl, install.sh).
 # health_port: 65530
 
 # ══════════════════════════════════════════════════════════════════════════════

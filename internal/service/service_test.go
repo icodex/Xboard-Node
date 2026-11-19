@@ -88,14 +88,6 @@ func (f *fakeKernel) GetUserTraffic(ctx context.Context) (map[int][2]int64, map[
 	_ = ctx
 	return nil, nil, 0, nil
 }
-func (f *fakeKernel) CloseConnection(ctx context.Context, connID string) error {
-	_, _ = ctx, connID
-	return nil
-}
-func (f *fakeKernel) CloseUserConnections(ctx context.Context, uuid string) error {
-	_, _ = ctx, uuid
-	return nil
-}
 func (f *fakeKernel) SetSpeedLimitFunc(fn func(uuid string) *rate.Limiter) { f.speedLimitFunc = fn }
 func (f *fakeKernel) SetDeviceLimitFunc(fn func(uuid string) (int, bool))  { f.deviceLimitFunc = fn }
 func (f *fakeKernel) UpdateGlobalDevices(users map[int][]string)           { _ = users }
@@ -113,6 +105,30 @@ func newTestService(k *fakeKernel) *Service {
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
 	return s
+}
+
+func TestNodeCertDir_IsolatesPerNodeDomains(t *testing.T) {
+	s := newTestService(&fakeKernel{running: true})
+	s.cfg = &config.Config{
+		Cert:   config.CertConfig{CertDir: "/etc/xboard/certs", Domain: "base.example.com"},
+		Kernel: config.KernelConfig{ConfigDir: "/etc/xboard/node-7"},
+	}
+	if got := s.nodeCertDir("base.example.com"); got != "/etc/xboard/certs" {
+		t.Errorf("shared domain must keep the configured dir, got %q", got)
+	}
+	if got := s.nodeCertDir(""); got != "/etc/xboard/certs" {
+		t.Errorf("empty domain must keep the configured dir, got %q", got)
+	}
+	if got := s.nodeCertDir("other.example.com"); got != "/etc/xboard/node-7/certs" {
+		t.Errorf("per-node domain must use the node dir, got %q", got)
+	}
+
+	// Empty config_dir must never produce a relative path: that wrote
+	// certificates into the process working directory.
+	s.cfg.Kernel.ConfigDir = ""
+	if got := s.nodeCertDir("other.example.com"); got != "/etc/xboard/certs" {
+		t.Errorf("empty config_dir must fall back to the configured dir, got %q", got)
+	}
 }
 
 func TestApplyUserUpdatePreparesLimiterBeforeKernelUpdate(t *testing.T) {
@@ -534,7 +550,7 @@ func TestCertReconfigureGivesUpAfterRetries(t *testing.T) {
 	s.certRetryBase = time.Millisecond
 
 	var attempts atomic.Int32
-	s.certReconfigure = func(context.Context, config.CertConfig) (bool, error) {
+	s.certReconfigure = func(_, _ context.Context, _ config.CertConfig) (bool, error) {
 		attempts.Add(1)
 		return false, errors.New("reconfigure failed")
 	}

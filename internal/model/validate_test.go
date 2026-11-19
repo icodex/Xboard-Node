@@ -19,6 +19,9 @@ func TestValidateTransportKernel(t *testing.T) {
 		{"h2 on xray rejected (removed upstream)", "h2", "xray", true},
 		{"http on xray rejected", "http", "xray", true},
 		{"quic on xray rejected", "quic", "xray", true},
+		{"quic on singbox rejected (neither kernel)", "quic", "singbox", true},
+		{"kcp on singbox rejected", "kcp", "singbox", true},
+		{"kcp on xray ok", "kcp", "xray", false},
 		{"xhttp on xray ok", "xhttp", "xray", false},
 		{"ws on singbox ok", "ws", "singbox", false},
 		{"ws on xray ok", "ws", "xray", false},
@@ -45,7 +48,7 @@ func TestResolveKernelForTransport(t *testing.T) {
 		{"xhttp switches singbox to xray", "xhttp", "singbox", "xray"},
 		{"h2 switches xray to singbox", "h2", "xray", "singbox"},
 		{"http switches xray to singbox", "http", "xray", "singbox"},
-		{"quic switches xray to singbox", "quic", "xray", "singbox"},
+		{"quic is unsupported by both, kernel unchanged", "quic", "xray", "xray"},
 		{"ws keeps singbox", "ws", "singbox", "singbox"},
 		{"ws keeps xray", "ws", "xray", "xray"},
 		{"xhttp keeps xray", "xhttp", "xray", "xray"},
@@ -229,4 +232,57 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestValidatePanelRoutes(t *testing.T) {
+	tags := map[string]struct{}{"direct": {}, "block": {}, "proxy-out": {}}
+	tests := []struct {
+		name      string
+		kernel    string
+		routes    []RouteRule
+		wantError bool
+	}{
+		{"valid cidr", "singbox", []RouteRule{{Match: []string{"10.0.0.0/8"}, Action: "proxy", ActionValue: "proxy-out"}}, false},
+		{"bad cidr", "singbox", []RouteRule{{Match: []string{"10.0.0.0/33"}, Action: "block"}}, true},
+		{"domain with slash", "xray", []RouteRule{{Match: []string{"example.com/path"}, Action: "block"}}, true},
+		{"geoip on singbox", "singbox", []RouteRule{{Match: []string{"geoip:cn"}, Action: "block"}}, true},
+		{"geoip on xray", "xray", []RouteRule{{Match: []string{"geoip:cn"}, Action: "block"}}, false},
+		{"unknown target", "singbox", []RouteRule{{Match: []string{"example.com"}, Action: "proxy", ActionValue: "missing"}}, true},
+		{"case-mismatched target", "singbox", []RouteRule{{Match: []string{"example.com"}, Action: "proxy", ActionValue: "Proxy-Out"}}, true},
+		{"proxy without target falls back to block", "xray", []RouteRule{{Match: []string{"example.com"}, Action: "proxy"}}, false},
+		{"dns on xray compiles to block", "xray", []RouteRule{{Match: []string{"example.com"}, Action: "dns", ActionValue: "dns-out"}}, false},
+		{"dns on singbox without target", "singbox", []RouteRule{{Match: []string{"example.com"}, Action: "dns"}}, true},
+		{"unknown action", "singbox", []RouteRule{{Match: []string{"example.com"}, Action: "allow"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePanelRoutes(tt.routes, tt.kernel, tags)
+			if (err != nil) != tt.wantError {
+				t.Errorf("validatePanelRoutes() error = %v, wantError %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateMatcherValues_CIDRAndRegexp(t *testing.T) {
+	tests := []struct {
+		name  string
+		match RouteMatch
+		ok    bool
+	}{
+		{"bare ip", RouteMatch{IPCIDRs: []string{"8.8.8.8"}}, true},
+		{"ipv6 cidr", RouteMatch{IPCIDRs: []string{"2001:db8::/32"}}, true},
+		{"bad cidr", RouteMatch{IPCIDRs: []string{"10.0.0.0/8/1"}}, false},
+		{"bad source ip", RouteMatch{SourceCIDRs: []string{"not-an-ip"}}, false},
+		{"xray valid regexp", RouteMatch{Domains: []string{`regexp:^ad\.`}}, true},
+		{"xray bad regexp", RouteMatch{Domains: []string{`regexp:[`}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMatcherValues("xray", tt.match, "rule.match")
+			if (err == nil) != tt.ok {
+				t.Errorf("validateMatcherValues() error = %v, want ok %v", err, tt.ok)
+			}
+		})
+	}
 }

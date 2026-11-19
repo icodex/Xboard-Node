@@ -514,3 +514,28 @@ func TestWSClient_DropsNullUsersPayload(t *testing.T) {
 		t.Fatalf("null users payload must be ignored, got %#v", got)
 	}
 }
+
+func TestValidateWSURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		panelURL  string
+		wsURL     string
+		wantError bool
+	}{
+		{"same host other port", "https://panel.example.com", "wss://panel.example.com:8076", false},
+		{"http panel allows ws", "http://panel.example.com", "ws://panel.example.com:8076", false},
+		{"https panel rejects ws downgrade", "https://panel.example.com", "ws://panel.example.com:8076", true},
+		{"foreign host rejected", "https://panel.example.com", "wss://attacker.example.com", true},
+		{"userinfo rejected", "https://panel.example.com", "wss://user:pass@panel.example.com", true},
+		{"bad scheme rejected", "https://panel.example.com", "http://panel.example.com", true},
+		{"empty ws rejected", "https://panel.example.com", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateWSURL(tt.wsURL, tt.panelURL)
+			if (err != nil) != tt.wantError {
+				t.Errorf("ValidateWSURL(%q, %q) error = %v, wantError %v", tt.wsURL, tt.panelURL, err, tt.wantError)
+			}
+		})
+	}
+}

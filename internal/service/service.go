@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -47,13 +48,6 @@ type Service struct {
 
 	// nodeLog is the logger with node context for this service instance.
 	nodeLog *nlog.NodeLog
-
-	// appliedState tracks the configuration and users that are currently
-	// successfully running in the kernel.
-	appliedState struct {
-		Config *model.NodeSpec
-		Users  []model.UserSpec
-	}
 
 	pushInterval int // seconds
 	pullInterval int // seconds
@@ -108,7 +102,7 @@ type Service struct {
 
 	// certReconfigure performs one reconfiguration attempt. Nil uses the cert
 	// manager; tests override it to count attempts without touching files.
-	certReconfigure func(context.Context, config.CertConfig) (bool, error)
+	certReconfigure func(opCtx, lifetimeCtx context.Context, cfg config.CertConfig) (bool, error)
 }
 
 // certUpdate carries an applied certificate configuration back to the main
@@ -121,11 +115,10 @@ type certUpdate struct {
 
 // pullResult carries the outcome of an async pullViaAPI back to the main goroutine.
 type pullResult struct {
-	config      *model.NodeSpec
-	users       []model.UserSpec
-	configHash  string
-	userHash    string
-	certChanged bool
+	config     *model.NodeSpec
+	users      []model.UserSpec
+	configHash string
+	userHash   string
 }
 
 // apiBackoff implements simple exponential backoff for API failures.
@@ -260,6 +253,33 @@ func (s *Service) ensureKernelResolved(spec *model.NodeSpec, resolved string) (k
 	return k, nil
 }
 
+// currentKernel returns the kernel the service is using right now. Kernel
+// auto-switch replaces s.kernel on the main loop, so goroutines that only
+// report status (WS ping, report push) must read it under kernelMu instead of
+// racing the swap.
+func (s *Service) currentKernel() kernel.Kernel {
+	s.kernelMu.Lock()
+	k := s.kernel
+	s.kernelMu.Unlock()
+	return k
+}
+
+// kernelRunning reports whether the current kernel accepts connections.
+func (s *Service) kernelRunning() bool {
+	k := s.currentKernel()
+	return k != nil && k.IsRunning()
+}
+
+// stopCurrentKernel stops whatever kernel is running now. Run's deferred stop
+// has to resolve the kernel at exit: with kernel.type auto the kernel object
+// can be replaced after Run starts, and binding the original receiver would
+// leave the live kernel running (still listening, still serving stale users).
+func (s *Service) stopCurrentKernel() {
+	if k := s.currentKernel(); k != nil {
+		k.Stop()
+	}
+}
+
 // matchesResolvedKernel reports whether k is the kernel auto mode resolved to.
 func matchesResolvedKernel(k kernel.Kernel, resolved string) bool {
 	switch resolved {
@@ -282,7 +302,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.initialSetup(ctx); err != nil {
 		return fmt.Errorf("initial setup: %w", err)
 	}
-	defer s.kernel.Stop()
+	defer s.stopCurrentKernel()
 
 	// Set up tickers
 	trackTicker := time.NewTicker(time.Duration(s.cfg.Node.TrackInterval) * time.Second)
@@ -316,6 +336,15 @@ func (s *Service) Run(ctx context.Context) error {
 			s.trackAndEnforce(ctx)
 
 		case <-reportTicker.C:
+			// certmagic renews on its own goroutine and only stores the new
+			// PEM. The kernel reads TLS material in Start/Reload, so the
+			// reload must be triggered here: REST polling (the other place
+			// that used to consume the flag) is skipped while the WS is
+			// connected, which left long-lived nodes serving an expired cert.
+			if s.cert.CertRenewed() && s.lastConfig != nil && len(s.lastUsers) > 0 {
+				nlog.Core().Info("certificate renewed, reloading kernel")
+				s.applyChanges(ctx, true, false)
+			}
 			s.pushReportAsync()
 
 		case <-deviceReportTicker.C:
@@ -327,6 +356,12 @@ func (s *Service) Run(ctx context.Context) error {
 			deferred := s.configDeferred.Swap(false)
 			if upd.ok {
 				s.cfg.Cert = upd.cfg
+			} else {
+				// The hash was already advanced when this config arrived, so the
+				// identical panel sync would be deduplicated and the failed
+				// certificate configuration would never be retried. Clearing it
+				// makes the next sync.cfg/config poll re-apply the cert config.
+				s.lastConfigHash = ""
 			}
 			if upd.changed || deferred {
 				s.applyChanges(ctx, true, false)
@@ -477,14 +512,14 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig, 
 		return false
 	}
 	cfgCopy := *newCfg
-	cfgCopy.CertDir = s.cfg.Cert.CertDir
+	cfgCopy.CertDir = s.nodeCertDir(cfgCopy.Domain)
 
 	if !syncCert {
 		s.startCertReconfigure(ctx, cfgCopy)
 		return false
 	}
 
-	changed, err := s.cert.Reconfigure(ctx, cfgCopy)
+	changed, err := s.cert.Reconfigure(ctx, ctx, cfgCopy)
 	if err != nil {
 		nlog.Core().Error("failed to apply runtime cert config", "mode", cfgCopy.CertMode, "error", err)
 		return false
@@ -499,6 +534,17 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig, 
 		}
 	}
 	return changed
+}
+
+// nodeCertDir picks where a panel-pushed certificate is stored. A domain that
+// differs from the one in the local config is per-node state: writing it into
+// the shared configured directory makes the last node win, and a restart can
+// then load a certificate issued for a different domain.
+func (s *Service) nodeCertDir(domain string) string {
+	if domain == "" || domain == s.cfg.Cert.Domain || s.cfg.Kernel.ConfigDir == "" {
+		return s.cfg.Cert.CertDir
+	}
+	return filepath.Join(s.cfg.Kernel.ConfigDir, "certs")
 }
 
 // startCertReconfigure serializes certificate reconfiguration in a background
@@ -548,7 +594,7 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 
 	for {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		changed, err := reconfigure(rctx, cfg)
+		changed, err := reconfigure(rctx, ctx, cfg)
 		cancel()
 		if err == nil {
 			attempt = 0
@@ -658,7 +704,7 @@ func (s *Service) requestWSResync(ctx context.Context, reason string) {
 func (s *Service) wsMetrics() map[string]interface{} {
 	status := monitor.Collect()
 	m := s.buildMetrics(status)
-	m["kernel_status"] = s.kernel.IsRunning()
+	m["kernel_status"] = s.kernelRunning()
 	return m
 }
 
@@ -844,7 +890,6 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 	}
 
 	currentConfigHash := s.lastConfigHash
-	certChanged := s.cert.CertRenewed()
 
 	go func() {
 		defer s.pullActive.Store(false)
@@ -856,11 +901,11 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 		}
 		s.pullBackoff.onSuccess()
 
-		result := pullResult{certChanged: certChanged}
+		result := pullResult{}
 		if snapshot.Config != nil {
 			result.config = snapshot.Config
 			result.configHash = computeConfigHash(snapshot.Config)
-			if result.configHash == currentConfigHash && !certChanged {
+			if result.configHash == currentConfigHash {
 				result.config = nil
 			}
 		}
@@ -880,11 +925,6 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	s.wsResyncPending.Store(false)
 	configChanged := false
-
-	if result.certChanged {
-		nlog.Core().Info("certificate renewed, kernel restart needed")
-		configChanged = true
-	}
 
 	if result.config != nil {
 		if err := validateNodeRuntime(s.cfg, s.kernelProtocolsFor(result.config), result.config, s.cert.TLSCert()); err != nil {
@@ -997,9 +1037,6 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	// immediately instead of inheriting an old skip count.
 	s.startBackoff.onSuccess()
 
-	s.appliedState.Config = nc
-	s.appliedState.Users = users
-
 	// Initialize node logger on first successful start
 	if s.nodeLog == nil {
 		s.nodeLog = nlog.ForNode(nodeDisplayProtocol(nc), nc.ServerPort)
@@ -1102,10 +1139,21 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		for _, old := range s.lastUsers {
 			prevByID[old.ID] = old
 		}
+		rotationFailed := false
 		for _, delta := range deltaUsers {
 			if old, ok := prevByID[delta.ID]; ok && old.UUID != delta.UUID {
-				s.kernel.RemoveUsers([]model.UserSpec{old})
+				if _, err := s.kernel.RemoveUsers([]model.UserSpec{old}); err != nil {
+					// Ignoring this left the old credential active in the kernel
+					// while the service moved on to the new UUID.
+					nlog.Core().Warn("RemoveUsers failed for rotated user, applying full update",
+						"user", old.ID, "error", err)
+					rotationFailed = true
+				}
 			}
+		}
+		if rotationFailed {
+			s.applyUserUpdate(ctx, merged, "")
+			return
 		}
 
 		prevUsers, prevHash := s.prepareUserState(merged)
@@ -1217,7 +1265,6 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
 		if len(s.lastUsers) == 0 {
 			s.kernel.Stop()
-			s.appliedState.Users = nil
 		}
 		return
 	}
@@ -1229,8 +1276,6 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 			nlog.Core().Warn(fmt.Sprintf("reload failed, restarting: %v", err))
 			s.startKernel(s.lastConfig, s.lastUsers)
 		} else {
-			s.appliedState.Config = s.lastConfig
-			s.appliedState.Users = s.lastUsers
 			if s.nodeLog != nil {
 				s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
 			}
@@ -1317,7 +1362,7 @@ func (s *Service) pushReportAsync() {
 		// handles WS events and kernel user updates.
 		status := monitor.Collect()
 		metrics := s.buildMetrics(status)
-		metrics["kernel_status"] = s.kernel.IsRunning()
+		metrics["kernel_status"] = s.kernelRunning()
 		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 			nlog.Core().Warn("failed to push report", "error", err)
 			if len(traffic) > 0 {
@@ -1346,7 +1391,7 @@ func (s *Service) pushReportSync() {
 	online := s.tracker.CurrentOnline()
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
+	metrics["kernel_status"] = s.kernelRunning()
 
 	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 		nlog.Core().Warn("failed to push final report", "error", err)

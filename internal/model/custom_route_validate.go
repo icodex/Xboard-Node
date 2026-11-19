@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -66,7 +68,9 @@ func ValidateCustomRouteRules(rules []CustomRouteRule, kernelType string, availa
 				return fmt.Errorf("custom_route_rules[%d].action.target is required when action.type is route", i)
 			}
 			if availableTags != nil {
-				if _, ok := availableTags[strings.ToLower(target)]; !ok {
+				// Kernel tag matching is case-sensitive: a lowercased lookup
+				// would accept a reference the kernel can never resolve.
+				if _, ok := availableTags[target]; !ok {
 					return fmt.Errorf("custom_route_rules[%d].action.target references unknown outbound %q", i, rule.Action.Target)
 				}
 			}
@@ -150,13 +154,17 @@ func matcherValuePrefix(value string) string {
 // interpret and prefixes used under the wrong matcher. On sing-box a
 // "geosite:"/"full:" value fails config parsing or silently becomes a literal;
 // on xray "geosite:" inside ip_cidrs never matches.
+//
+// Values without a prefix are copied into the kernel rule set verbatim, so
+// they must already parse there: an unparsable CIDR or regexp makes the kernel
+// reject the whole config and the service then restarts it in a loop.
 func validateMatcherValues(kernelType string, match RouteMatch, field string) error {
 	kernelType = strings.ToLower(strings.TrimSpace(kernelType))
-	if kernelType == "" {
-		return nil
-	}
 	check := func(values []string, kind, label string) error {
 		for _, value := range values {
+			if kernelType == "" {
+				break
+			}
 			prefix := matcherValuePrefix(value)
 			if prefix == "" {
 				continue
@@ -188,16 +196,70 @@ func validateMatcherValues(kernelType string, match RouteMatch, field string) er
 		}
 		return nil
 	}
-	if err := check(match.IPCIDRs, "ip", "ip_cidrs"); err != nil {
+	if kernelType != "" {
+		if err := check(match.IPCIDRs, "ip", "ip_cidrs"); err != nil {
+			return err
+		}
+		if err := check(match.SourceCIDRs, "ip", "source_cidrs"); err != nil {
+			return err
+		}
+		if err := check(match.Domains, "domain", "domains"); err != nil {
+			return err
+		}
+		if err := check(match.DomainSuffixes, "domain", "domain_suffixes"); err != nil {
+			return err
+		}
+	}
+	if err := validateIPMatcherValues(match.IPCIDRs, field+".ip_cidrs"); err != nil {
 		return err
 	}
-	if err := check(match.SourceCIDRs, "ip", "source_cidrs"); err != nil {
+	if err := validateIPMatcherValues(match.SourceCIDRs, field+".source_cidrs"); err != nil {
 		return err
 	}
-	if err := check(match.Domains, "domain", "domains"); err != nil {
+	if err := validateRegexpMatcherValues(match.Domains, field+".domains"); err != nil {
 		return err
 	}
-	return check(match.DomainSuffixes, "domain", "domain_suffixes")
+	return validateRegexpMatcherValues(match.DomainSuffixes, field+".domain_suffixes")
+}
+
+// validateIPMatcherValues requires every unprefixed CIDR/IP matcher value to
+// parse. Both kernels accept a prefix or a bare address here; anything else
+// (for example "example.com/path" or "10.0.0.0/33") is rejected at config
+// time instead of at kernel start.
+func validateIPMatcherValues(values []string, field string) error {
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" || matcherValuePrefix(value) != "" {
+			continue
+		}
+		if _, err := netip.ParsePrefix(value); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(value); err == nil {
+			continue
+		}
+		return fmt.Errorf("%s contains %q: not a valid CIDR or IP address", field, raw)
+	}
+	return nil
+}
+
+// validateRegexpMatcherValues compiles every "regexp:" domain matcher value so
+// a bad expression fails validation instead of xray config parsing.
+func validateRegexpMatcherValues(values []string, field string) error {
+	for _, raw := range values {
+		if matcherValuePrefix(raw) != "regexp" {
+			continue
+		}
+		value := strings.TrimSpace(raw)
+		expr := strings.TrimSpace(value[len("regexp:"):])
+		if expr == "" {
+			return fmt.Errorf("%s contains %q: empty regexp", field, raw)
+		}
+		if _, err := regexp.Compile(expr); err != nil {
+			return fmt.Errorf("%s contains %q: %v", field, raw, err)
+		}
+	}
+	return nil
 }
 
 func validateNetworks(values []string, field string) error {

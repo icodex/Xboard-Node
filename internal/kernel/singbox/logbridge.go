@@ -80,7 +80,10 @@ func (b *nlogBridge) WriteMessage(level singLog.Level, message string) {
 		core.Error(msg)
 	case level == singLog.LevelError:
 		if downgradeInboundError(msg) {
-			core.Warn(msg)
+			// Per-connection noise (handshake/auth failures): at WARN a port
+			// scanner or a broken client writes one line per attempt and can
+			// fill the log target, drowning real errors.
+			core.Debug(msg)
 		} else {
 			core.Error(msg)
 		}

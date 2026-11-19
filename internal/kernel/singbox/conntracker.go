@@ -193,7 +193,9 @@ func (t *ConnTracker) RoutedConnection(
 	// Device limit gate-keeping registers the connection under the same lock,
 	// so concurrent admissions cannot both pass the count check.
 	if !t.admitConnectionFor(us, uid, uuid, sourceIP) {
-		nlog.Core().Info("singbox: device limit gate-keep, rejecting connection",
+		// Per-connection: Debug keeps a user who loops on reconnect from
+		// writing a log line per attempt.
+		nlog.Core().Debug("singbox: device limit gate-keep, rejecting connection",
 			"user", uuid, "ip", sourceIP)
 		conn.Close()
 		return conn
@@ -232,7 +234,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 	// Device limit gate-keeping registers the connection under the same lock,
 	// so concurrent admissions cannot both pass the count check.
 	if !t.admitConnectionFor(us, uid, uuid, sourceIP) {
-		nlog.Core().Info("singbox: device limit gate-keep, rejecting UDP connection",
+		nlog.Core().Debug("singbox: device limit gate-keep, rejecting UDP connection",
 			"user", uuid, "ip", sourceIP)
 		conn.Close()
 		return conn

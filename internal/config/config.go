@@ -774,6 +774,11 @@ func (c *Config) validate() error {
 	if c.Node.PullInterval < 0 {
 		return fmt.Errorf("node.pull_interval must not be negative")
 	}
+	// Plaintext http is allowed (LAN panels exist) but must be a conscious
+	// choice: the token and every user credential cross the network in clear.
+	if u, err := url.Parse(strings.TrimSpace(c.Panel.URL)); err == nil && strings.EqualFold(u.Scheme, "http") {
+		nlog.Core().Warn("panel.url uses plaintext http: the panel token and user data cross the network unencrypted", "host", u.Host)
+	}
 	return nil
 }
 
@@ -826,7 +831,9 @@ func (c *Config) ExpandNodes() []*Config {
 			nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
 		}
 
-		// Per-node cert overrides
+		// Per-node cert overrides. Nodes that inherit the top-level cert config
+		// share one domain (and therefore one directory, so the certificate is
+		// issued once); an explicit per-node block gets its own derived dir.
 		if entry.Cert != nil {
 			nodeCfg.Cert = *entry.Cert
 		}
@@ -890,7 +897,7 @@ func InitLogger(cfg LogConfig) {
 			w = os.Stdout
 			useColor = term.IsTerminal(int(os.Stdout.Fd()))
 		} else {
-			f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to open log file, falling back to stdout: %v\n", err)
 				w = os.Stdout

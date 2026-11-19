@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -152,28 +153,6 @@ func TestGetUsers_NotModified(t *testing.T) {
 	}
 }
 
-func TestResetETags(t *testing.T) {
-	callCount := 0
-	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount <= 2 {
-			w.Header().Set("ETag", `"e1"`)
-			json.NewEncoder(w).Encode(NodeConfig{Protocol: "ss"})
-			return
-		}
-		// After reset, should NOT send If-None-Match
-		if r.Header.Get("If-None-Match") != "" {
-			t.Errorf("expected no If-None-Match after reset, got %q", r.Header.Get("If-None-Match"))
-		}
-		json.NewEncoder(w).Encode(NodeConfig{Protocol: "ss"})
-	})
-	defer ts.Close()
-
-	client.GetConfig()
-	client.ResetETags()
-	client.GetConfig()
-}
-
 func TestClient_NodeTypeInQuery(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("node_type") != "vmess" {
@@ -231,5 +210,23 @@ func TestStringOrArrayDecodeHook_String(t *testing.T) {
 	want := "stop=8\n0=30-30"
 	if string(cfg.PaddingScheme) != want {
 		t.Errorf("got %q, want %q", cfg.PaddingScheme, want)
+	}
+}
+
+// GET requests carry the panel token in the query string. net/http wraps
+// transport failures in *url.Error, whose Error() includes the full URL; the
+// service logs those strings at Error level, so they must not leak the token.
+func TestGetConfig_TransportErrorDropsToken(t *testing.T) {
+	client := NewClient(config.PanelConfig{
+		URL:    "http://127.0.0.1:1",
+		Token:  "super-secret-token",
+		NodeID: 1,
+	})
+	_, err := client.GetConfig()
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), "super-secret-token") || strings.Contains(err.Error(), "token=") {
+		t.Fatalf("error leaks the panel token: %v", err)
 	}
 }

@@ -2,9 +2,11 @@ package model
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/outbound"
 )
 
 func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
@@ -66,6 +68,9 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if err := ValidateCustomRouteRules(n.CustomRouteRules, kernelType, availableTags); err != nil {
 		return fmt.Errorf("validate custom route rules: %w", err)
 	}
+	if err := validatePanelRoutes(n.Routes, kernelType, availableTags); err != nil {
+		return fmt.Errorf("validate routes: %w", err)
+	}
 	// Raw custom_routes never fail the node: bad entries are dropped with an
 	// error log (legacy panel data must not start a crash loop).
 	SanitizeRawCustomRoutes(n, kernelType, availableTags)
@@ -88,27 +93,17 @@ var xrayShadowsocksCiphers = map[string]bool{
 	"2022-blake3-aes-256-gcm": true,
 }
 
-// singboxUnsupportedTransports lists transport types that sing-box does not support.
-var singboxUnsupportedTransports = map[string]bool{
-	"xhttp":     true,
-	"splithttp": true,
-}
-
-// xrayUnsupportedTransports lists transport types the pinned xray-core fork
-// removed (infra/conf/transport_internet.go: h2/http and quic return
-// PrintRemovedFeatureError and fail config parsing).
-var xrayUnsupportedTransports = map[string]bool{
-	"h2":   true,
-	"http": true,
-	"quic": true,
-}
-
+// Transport capability comes from outbound's tables: a second copy here had
+// already drifted (it was missing kcp/mkcp/quic for sing-box), so auto mode
+// picked a kernel that could not parse the transport.
 func validateTransportKernel(network, kernelType string) error {
 	net := strings.ToLower(strings.TrimSpace(network))
-	if kernelType == "singbox" && singboxUnsupportedTransports[net] {
+	switch {
+	case outbound.NetworkUnsupportedByBoth(net):
+		return fmt.Errorf("transport %q is not supported by either kernel", net)
+	case kernelType == "singbox" && outbound.SingboxUnsupportedNetwork(net):
 		return fmt.Errorf("transport %q is not supported by sing-box kernel; use xray kernel instead", net)
-	}
-	if kernelType == "xray" && xrayUnsupportedTransports[net] {
+	case kernelType == "xray" && outbound.XrayUnsupportedNetwork(net):
 		return fmt.Errorf("transport %q is not supported by xray kernel (removed upstream); use sing-box kernel instead", net)
 	}
 	return nil
@@ -120,10 +115,14 @@ func validateTransportKernel(network, kernelType string) error {
 // This is used in machine mode to auto-switch kernel per node.
 func ResolveKernelForTransport(network, configuredKernel string) string {
 	net := strings.ToLower(strings.TrimSpace(network))
-	if configuredKernel == "singbox" && singboxUnsupportedTransports[net] {
+	if outbound.NetworkUnsupportedByBoth(net) {
+		// No kernel can serve it; validation reports the precise reason.
+		return configuredKernel
+	}
+	if configuredKernel == "singbox" && outbound.SingboxUnsupportedNetwork(net) {
 		return "xray"
 	}
-	if configuredKernel == "xray" && xrayUnsupportedTransports[net] {
+	if configuredKernel == "xray" && outbound.XrayUnsupportedNetwork(net) {
 		return "singbox"
 	}
 	return configuredKernel
@@ -170,11 +169,13 @@ func ResolveKernelForNode(n *NodeSpec, kcfg config.KernelConfig) string {
 		return "singbox"
 	}
 	net := strings.ToLower(strings.TrimSpace(n.Network))
-	if singboxUnsupportedTransports[net] {
-		return "xray"
-	}
-	if xrayUnsupportedTransports[net] {
-		return "singbox"
+	if !outbound.NetworkUnsupportedByBoth(net) {
+		if outbound.SingboxUnsupportedNetwork(net) {
+			return "xray"
+		}
+		if outbound.XrayUnsupportedNetwork(net) {
+			return "singbox"
+		}
 	}
 	if protocol == "vmess" && n.TLS == 2 {
 		return "xray"
@@ -195,24 +196,91 @@ func normalizeKernelType(value string) (string, error) {
 	}
 }
 
+// buildAvailableOutboundTags returns the outbound tags that will be rendered
+// into the kernel config. Tags keep their original case: both kernels match
+// tag references exactly, so a case-insensitive set would pass references the
+// kernel can never resolve.
 func buildAvailableOutboundTags(structured []OutboundConfig, rawTags []string) map[string]struct{} {
 	available := map[string]struct{}{
 		"direct": {},
 		"block":  {},
 	}
 	for _, outbound := range structured {
-		tag := strings.ToLower(strings.TrimSpace(outbound.Tag))
+		tag := strings.TrimSpace(outbound.Tag)
 		if tag != "" {
 			available[tag] = struct{}{}
 		}
 	}
 	for _, tag := range rawTags {
-		tag = strings.ToLower(strings.TrimSpace(tag))
+		tag = strings.TrimSpace(tag)
 		if tag != "" {
 			available[tag] = struct{}{}
 		}
 	}
 	return available
+}
+
+// validatePanelRoutes checks the legacy panel routes list before the kernel
+// builders copy its values verbatim. Both builders classify a matcher by
+// "contains a slash" and write action_value as an outbound tag, so an
+// unparsable CIDR, an unsupported database reference or an unknown tag makes
+// the kernel reject the entire config (and the service then restarts it in a
+// loop).
+func validatePanelRoutes(routes []RouteRule, kernelType string, availableTags map[string]struct{}) error {
+	for i, rule := range routes {
+		for _, raw := range rule.Match {
+			item := strings.TrimSpace(raw)
+			if item == "" {
+				continue
+			}
+			lowered := strings.ToLower(item)
+			switch {
+			case strings.HasPrefix(lowered, "geoip:"):
+				if kernelType == "singbox" {
+					return fmt.Errorf("routes[%d].match %q: the sing-box kernel has no geoip database; use plain CIDRs or the xray kernel", i, raw)
+				}
+			case strings.HasPrefix(lowered, "geosite:"):
+				if kernelType == "singbox" {
+					return fmt.Errorf("routes[%d].match %q: the sing-box kernel has no geosite database; use plain domains or the xray kernel", i, raw)
+				}
+			case strings.Contains(item, "/"):
+				if _, err := netip.ParsePrefix(item); err != nil {
+					return fmt.Errorf("routes[%d].match %q: not a valid CIDR", i, raw)
+				}
+			}
+		}
+
+		// The builders default an empty action to block; keep that contract.
+		action := strings.ToLower(strings.TrimSpace(rule.Action))
+		target := strings.TrimSpace(rule.ActionValue)
+		switch action {
+		case "", "block", "direct":
+			continue
+		case "proxy":
+		case "dns":
+			if kernelType == "xray" {
+				// xray compiles this action to block and ignores action_value.
+				continue
+			}
+			if target == "" {
+				// The sing-box builder writes outbound "dns-out", which the
+				// node never defines; the kernel then rejects the config.
+				return fmt.Errorf("routes[%d].action %q requires action_value on the sing-box kernel", i, rule.Action)
+			}
+		default:
+			return fmt.Errorf("routes[%d].action %q is not supported (use block, direct, proxy or dns)", i, rule.Action)
+		}
+		if target == "" {
+			// target-less proxy falls back to block in both builders.
+			continue
+		}
+		if availableTags != nil {
+			if _, ok := availableTags[target]; !ok {
+				return fmt.Errorf("routes[%d].action_value references unknown outbound %q", i, rule.ActionValue)
+			}
+		}
+	}
+	return nil
 }
 
 // hysteriaBBRProfiles matches both the sing-box fork enum and hysteria core

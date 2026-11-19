@@ -12,7 +12,6 @@ import (
 // snapshot is an immutable point-in-time view of tracker state.
 // It is swapped atomically so readers never block writers.
 type snapshot struct {
-	traffic   map[int][2]int64        // userID → [upload, download] delta
 	aliveIPs  map[int]map[string]bool // userID → set of source IPs
 	online    map[int]int             // userID → distinct IP count
 	connCount int
@@ -72,7 +71,6 @@ func New() *Tracker {
 	}
 	// Publish initial empty snapshot.
 	t.live.Store(&snapshot{
-		traffic:  make(map[int][2]int64),
 		aliveIPs: make(map[int]map[string]bool),
 		online:   make(map[int]int),
 	})
@@ -140,7 +138,6 @@ func (t *Tracker) Process(
 
 	// Publish new snapshot (readers will see this atomically).
 	t.live.Store(&snapshot{
-		traffic:        copyTrafficMap(t.pendingTraffic),
 		aliveIPs:       kernelAliveIPs, // kernel provides fresh copy each tick
 		online:         online,
 		connCount:      connCount,
@@ -301,13 +298,4 @@ func cycleSpeed(cycleBytes int64, elapsed time.Duration) int64 {
 		elapsed = defaultTrackInterval
 	}
 	return int64(float64(cycleBytes) / elapsed.Seconds())
-}
-
-// copyTrafficMap creates a shallow copy of the traffic map.
-func copyTrafficMap(src map[int][2]int64) map[int][2]int64 {
-	dst := make(map[int][2]int64, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
 }

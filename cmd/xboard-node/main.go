@@ -62,7 +62,10 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		if port <= 0 {
 			return nil
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		// Loopback only: the endpoint is unauthenticated and every probe
+		// (xbctl, install.sh) uses 127.0.0.1. Exposing it on all interfaces
+		// invited fingerprinting and connection exhaustion.
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			return fmt.Errorf("listen :%d: %w", port, err)
 		}
@@ -72,11 +75,17 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"status":"ok"}`))
 		})
-		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		srv := &http.Server{
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		healthSrv = srv
 		healthPort = port
 		go func() {
-			nlog.Core().Debug(fmt.Sprintf("health check listening on :%d", port))
+			nlog.Core().Debug(fmt.Sprintf("health check listening on 127.0.0.1:%d", port))
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				nlog.Core().Warn("health check server stopped", "error", err)
 			}
@@ -204,11 +213,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 								return
 							}
 						}
-						svc := service.New(nodeCfg)
-						if err := svc.Run(ctx); err != nil {
-							nlog.Core().Error("node service exited with error", "instance", nodeCfg.InstanceID, "node_id", nodeCfg.Panel.NodeID, "error", err)
-							reportErr(err)
-						}
+						runNodeService(ctx, nodeCfg)
 					}(idx)
 				}
 				instanceWG.Wait()
@@ -248,6 +253,40 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		applyRuntimeConfig(newInstances[0].Runtime)
 		root = newRoot
 		nlog.Core().Info("reload complete, services restarting with new config")
+	}
+}
+
+// runNodeService keeps one node alive. Service.Run only returns on a fatal
+// setup error (panel unreachable at startup, certificate issuance failure, a
+// rejected config), so rebuild the service with capped backoff instead of
+// cancelling the shared context: one broken node used to stop every other
+// node, and the resulting systemd restart loop re-ran ACME every 5s until
+// Let's Encrypt rate-limited the domain.
+func runNodeService(ctx context.Context, nodeCfg *config.Config) {
+	const maxBackoff = 5 * time.Minute
+	backoff := 5 * time.Second
+	for {
+		svc := service.New(nodeCfg)
+		err := svc.Run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		nlog.Core().Error("node service exited with error, retrying",
+			"instance", nodeCfg.InstanceID, "node_id", nodeCfg.Panel.NodeID,
+			"error", err, "retry_in", backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
 }
 

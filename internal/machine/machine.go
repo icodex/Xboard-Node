@@ -145,6 +145,17 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	go func() {
 		defer close(done)
 		defer o.unregisterNode(mn.ID)
+		// A node whose Service.Run returned never restarts: the handle stayed in
+		// o.nodes, so rediscover's startNode saw it as already running and
+		// returned. Removing it here lets the next discovery tick bring the node
+		// back instead of leaving it offline until the process restarts.
+		defer func() {
+			o.mu.Lock()
+			if cur, ok := o.nodes[mn.ID]; ok && cur.done == done {
+				delete(o.nodes, mn.ID)
+			}
+			o.mu.Unlock()
+		}()
 
 		nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
 
@@ -308,6 +319,10 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	}
 	if !hs.WebSocket.Enabled || hs.WebSocket.WSURL == "" {
 		nlog.Core().Debug("machine: ws disabled by panel, REST only")
+		return
+	}
+	if err := panel.ValidateWSURL(hs.WebSocket.WSURL, o.cfg.Panel.URL); err != nil {
+		nlog.Core().Warn("machine: panel websocket url rejected, REST only", "error", err)
 		return
 	}
 

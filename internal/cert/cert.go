@@ -119,10 +119,27 @@ func (m *Manager) persistPEMTo(dir string, cert, key []byte) {
 	}
 }
 
-// atomicWriteFile writes data to a temp file and renames, preventing partial reads.
+// atomicWriteFile writes data to a temp file and renames, preventing partial
+// reads. The temp name must be unique: a fixed "<path>.tmp" let two instances
+// sharing a directory interleave writes and land one instance's certificate
+// next to the other's key.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once the rename succeeded
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -161,7 +178,11 @@ func (m *Manager) loadPersistedPEM() bool {
 
 // Reconfigure applies a new cert configuration at runtime (e.g. from panel push).
 // Returns true when the PEM material changed (caller should restart kernel).
-func (m *Manager) Reconfigure(ctx context.Context, newCfg config.CertConfig) (bool, error) {
+//
+// opCtx bounds the blocking work (issuance can take minutes); lifetimeCtx owns
+// the long-running ACME maintenance. The caller cancels opCtx when the attempt
+// returns, so renewal must not be derived from it.
+func (m *Manager) Reconfigure(opCtx, lifetimeCtx context.Context, newCfg config.CertConfig) (bool, error) {
 	if newCfg.CertDir == "" {
 		newCfg.CertDir = m.cfg.CertDir
 	}
@@ -179,7 +200,7 @@ func (m *Manager) Reconfigure(ctx context.Context, newCfg config.CertConfig) (bo
 	oldTLS := m.TLSCert()
 	m.cfg = newCfg
 
-	if err := m.Start(ctx); err != nil {
+	if err := m.start(opCtx, lifetimeCtx); err != nil {
 		return false, fmt.Errorf("cert reconfigure: %w", err)
 	}
 
@@ -305,8 +326,15 @@ func pemEqual(a, b kernel.TLSCert) bool {
 	return string(a.CertPEM) == string(b.CertPEM) && string(a.KeyPEM) == string(b.KeyPEM)
 }
 
-// Start initializes the cert manager based on the resolved mode.
+// Start initializes the cert manager based on the resolved mode. The context
+// bounds the blocking work and also owns ACME maintenance (startup path).
 func (m *Manager) Start(ctx context.Context) error {
+	return m.start(ctx, ctx)
+}
+
+// start separates the blocking-work deadline from the ACME maintenance
+// lifetime; only Reconfigure needs that split.
+func (m *Manager) start(ctx, lifetimeCtx context.Context) error {
 	mode := m.resolveMode()
 
 	switch mode {
@@ -319,13 +347,13 @@ func (m *Manager) Start(ctx context.Context) error {
 	case "content":
 		return m.startContent()
 	case "http":
-		return m.startACME(ctx, nil)
+		return m.startACME(ctx, lifetimeCtx, nil)
 	case "dns":
 		solver, err := m.buildDNSSolver()
 		if err != nil {
 			return fmt.Errorf("build dns solver: %w", err)
 		}
-		return m.startACME(ctx, solver)
+		return m.startACME(ctx, lifetimeCtx, solver)
 	default:
 		return fmt.Errorf("unknown cert_mode: %q (supported: http, dns, self, file, content, none)", mode)
 	}
@@ -447,7 +475,7 @@ func (m *Manager) startContent() error {
 
 // ─── Mode: http / dns (ACME) ──────────────────────────────────────────────
 
-func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solver) error {
+func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certmagic.DNS01Solver) error {
 	// Idempotent for unchanged config: Reconfigure already tore down stale ACME state.
 	if m.acmeStarted {
 		return nil
@@ -526,16 +554,19 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 	}
 	m.magic = magic
 
-	// Derived ctx so Reconfigure can cancel ACME background goroutines.
-	acmeCtx, acmeCancel := context.WithCancel(ctx)
+	// Derived from the manager lifetime so Reconfigure can cancel ACME
+	// background goroutines, while the per-attempt deadline only bounds the
+	// blocking calls below: deriving renewal from opCtx (cancelled as soon as
+	// the attempt returns) silently disabled all future renewals.
+	acmeCtx, acmeCancel := context.WithCancel(lifetimeCtx)
 
-	if err := magic.ObtainCertSync(acmeCtx, domain); err != nil {
+	if err := magic.ObtainCertSync(opCtx, domain); err != nil {
 		acmeCancel()
 		return fmt.Errorf("obtain certificate: %w", err)
 	}
 
 	issuerKey := magic.Issuers[0].IssuerKey()
-	if err := m.loadPEMFromStorageAt(acmeCtx, storage, issuerKey, domain, certDir); err != nil {
+	if err := m.loadPEMFromStorageAt(opCtx, storage, issuerKey, domain, certDir); err != nil {
 		acmeCancel()
 		return fmt.Errorf("load cert from storage: %w", err)
 	}

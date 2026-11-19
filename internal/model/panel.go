@@ -1,9 +1,33 @@
 package model
 
 import (
+	"strings"
+
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/panel"
 )
+
+// sanitizePanelDNSEnv drops endpoint overrides from a panel-supplied dns_env.
+// Keys such as NAMECHEAP_API_ENDPOINT or OVH_ENDPOINT are full URLs, so a
+// panel could aim the node's DNS-01 requests (and the provider credentials
+// they carry) at any host, including an internal address. Only credential
+// values are legitimate panel input; endpoints stay an operator decision.
+func sanitizePanelDNSEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return env
+	}
+	out := make(map[string]string, len(env))
+	for key, value := range env {
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if strings.HasSuffix(upper, "_ENDPOINT") || strings.HasSuffix(upper, "_URL") {
+			nlog.Core().Warn("ignoring panel dns_env endpoint override", "key", key)
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
 
 func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 	if nc == nil {
@@ -17,7 +41,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 			Domain:      nc.CertConfig.Domain,
 			Email:       nc.CertConfig.Email,
 			DNSProvider: nc.CertConfig.DNSProvider,
-			DNSEnv:      nc.CertConfig.DNSEnv,
+			DNSEnv:      sanitizePanelDNSEnv(nc.CertConfig.DNSEnv),
 			HTTPPort:    nc.CertConfig.HTTPPort,
 			CertFile:    nc.CertConfig.CertFile,
 			KeyFile:     nc.CertConfig.KeyFile,
@@ -151,148 +175,6 @@ func UserSpecsFromPanel(users []panel.User) []UserSpec {
 	out := make([]UserSpec, 0, len(users))
 	for _, user := range users {
 		out = append(out, UserSpec{ID: user.ID, UUID: user.UUID, SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
-	}
-	return out
-}
-
-func (n *NodeSpec) ToPanel() *panel.NodeConfig {
-	if n == nil {
-		return nil
-	}
-
-	var certCfg *panel.CertConfig
-	if n.CertConfig != nil {
-		certCfg = &panel.CertConfig{
-			CertMode:    n.CertConfig.CertMode,
-			Domain:      n.CertConfig.Domain,
-			Email:       n.CertConfig.Email,
-			DNSProvider: n.CertConfig.DNSProvider,
-			DNSEnv:      n.CertConfig.DNSEnv,
-			HTTPPort:    n.CertConfig.HTTPPort,
-			CertFile:    n.CertConfig.CertFile,
-			KeyFile:     n.CertConfig.KeyFile,
-			CertContent: n.CertConfig.CertContent,
-			KeyContent:  n.CertConfig.KeyContent,
-		}
-	}
-
-	var multiplex *panel.MultiplexConfig
-	if n.Multiplex != nil {
-		multiplex = &panel.MultiplexConfig{
-			Enabled:        n.Multiplex.Enabled,
-			Protocol:       n.Multiplex.Protocol,
-			MaxConnections: n.Multiplex.MaxConnections,
-			MinStreams:     n.Multiplex.MinStreams,
-			MaxStreams:     n.Multiplex.MaxStreams,
-			Padding:        n.Multiplex.Padding,
-		}
-		if n.Multiplex.Brutal != nil {
-			multiplex.Brutal = &panel.BrutalConfig{
-				Enabled:  n.Multiplex.Brutal.Enabled,
-				UpMbps:   n.Multiplex.Brutal.UpMbps,
-				DownMbps: n.Multiplex.Brutal.DownMbps,
-			}
-		}
-	}
-
-	routes := make([]panel.RouteRule, 0, len(n.Routes))
-	for _, route := range n.Routes {
-		routes = append(routes, panel.RouteRule{
-			ID:          route.ID,
-			Match:       cloneStringSlice(route.Match),
-			Action:      route.Action,
-			ActionValue: route.ActionValue,
-		})
-	}
-
-	outbounds := make([]panel.OutboundConfig, 0, len(n.CustomOutbounds))
-	for _, outbound := range n.CustomOutbounds {
-		outbounds = append(outbounds, panel.OutboundConfig{
-			Tag:            outbound.Tag,
-			Protocol:       outbound.Protocol,
-			Settings:       cloneAnyMap(outbound.Settings),
-			StreamSettings: cloneAnyMap(outbound.StreamSettings),
-			Mux:            cloneAnyMap(outbound.Mux),
-			ProxyTag:       outbound.ProxyTag,
-		})
-	}
-
-	customRouteRules := make([]panel.CustomRouteRule, 0, len(n.CustomRouteRules))
-	for _, rule := range n.CustomRouteRules {
-		customRouteRules = append(customRouteRules, panel.CustomRouteRule{
-			Name:     rule.Name,
-			Disabled: rule.Disabled,
-			Match: panel.RouteMatch{
-				Domains:        cloneStringSlice(rule.Match.Domains),
-				DomainSuffixes: cloneStringSlice(rule.Match.DomainSuffixes),
-				IPCIDRs:        cloneStringSlice(rule.Match.IPCIDRs),
-				Ports:          cloneStringSlice(rule.Match.Ports),
-				Networks:       cloneStringSlice(rule.Match.Networks),
-				SourceCIDRs:    cloneStringSlice(rule.Match.SourceCIDRs),
-				SourcePorts:    cloneStringSlice(rule.Match.SourcePorts),
-			},
-			Action: panel.RouteAction{
-				Type:   rule.Action.Type,
-				Target: rule.Action.Target,
-			},
-		})
-	}
-
-	return &panel.NodeConfig{
-		Protocol:                n.Protocol,
-		ListenIP:                n.ListenIP,
-		ServerPort:              n.ServerPort,
-		Network:                 n.Network,
-		NetworkSettings:         cloneAnyMap(n.NetworkSettings),
-		Routes:                  routes,
-		KernelType:              n.KernelType,
-		KernelLogLevel:          n.KernelLogLevel,
-		CustomOutbounds:         outbounds,
-		CustomRoutes:            cloneMapSlice(n.CustomRoutes),
-		CustomRouteRules:        customRouteRules,
-		CertConfig:              certCfg,
-		AutoTLS:                 n.AutoTLS,
-		Domain:                  n.Domain,
-		Cipher:                  n.Cipher,
-		Plugin:                  n.Plugin,
-		PluginOpt:               n.PluginOpt,
-		ServerKey:               n.ServerKey,
-		TLS:                     n.TLS,
-		Flow:                    n.Flow,
-		Decryption:              n.Decryption,
-		TLSSettings:             cloneAnyMap(n.TLSSettings),
-		Host:                    n.Host,
-		ServerName:              n.ServerName,
-		Version:                 n.Version,
-		UpMbps:                  n.UpMbps,
-		DownMbps:                n.DownMbps,
-		Obfs:                    n.Obfs,
-		ObfsPassword:            n.ObfsPassword,
-		Sniff:                   n.Sniff,
-		Masquerade:              n.Masquerade,
-		Quic:                    n.Quic,
-		HysteriaCongestion:      n.HysteriaCongestion,
-		Resolver:                cloneAnyMap(n.Resolver),
-		DisableUDP:              n.DisableUDP,
-		UDPIdleTimeout:          n.UDPIdleTimeout,
-		IgnoreClientBandwidth:   n.IgnoreClientBandwidth,
-		DisableLossCompensation: n.DisableLossCompensation,
-		CongestionControl:       n.CongestionControl,
-		PaddingScheme:           panel.StringOrArray(n.PaddingScheme),
-		Transport:               n.Transport,
-		TrafficPattern:          n.TrafficPattern,
-		Multiplex:               multiplex,
-		AcceptProxyProtocol:     n.AcceptProxyProtocol,
-	}
-}
-
-func UserSpecsToPanel(users []UserSpec) []panel.User {
-	if users == nil {
-		return nil
-	}
-	out := make([]panel.User, 0, len(users))
-	for _, user := range users {
-		out = append(out, panel.User{ID: user.ID, UUID: user.UUID, SpeedLimit: user.SpeedLimit, DeviceLimit: user.DeviceLimit})
 	}
 	return out
 }
