@@ -523,7 +523,9 @@ func TestBuildInbound_Naive(t *testing.T) {
 	assertMapValue(t, inbound, "type", "naive")
 
 	users := inbound["users"].([]M)
-	assertMapValue(t, users[0], "username", "1")
+	// Username must be the UUID: the panel subscription authenticates as
+	// UUID:UUID, and sing-box reports it as metadata.User for traffic mapping.
+	assertMapValue(t, users[0], "username", "aaaaaaaa-1111-2222-3333-444444444444")
 	assertMapValue(t, users[0], "password", "aaaaaaaa-1111-2222-3333-444444444444")
 
 	tls := inbound["tls"].(M)
