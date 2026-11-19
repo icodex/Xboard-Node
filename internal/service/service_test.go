@@ -556,7 +556,7 @@ func TestCertReconfigureGivesUpAfterRetries(t *testing.T) {
 	s.certRetryBase = time.Millisecond
 
 	var attempts atomic.Int32
-	s.certReconfigure = func(_, _ context.Context, _ config.CertConfig) (bool, error) {
+	s.certReconfigure = func(_ context.Context, _ config.CertConfig) (bool, error) {
 		attempts.Add(1)
 		return false, errors.New("reconfigure failed")
 	}

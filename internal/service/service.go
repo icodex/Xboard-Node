@@ -113,7 +113,7 @@ type Service struct {
 
 	// certReconfigure performs one reconfiguration attempt. Nil uses the cert
 	// manager; tests override it to count attempts without touching files.
-	certReconfigure func(opCtx, lifetimeCtx context.Context, cfg config.CertConfig) (bool, error)
+	certReconfigure func(opCtx context.Context, cfg config.CertConfig) (bool, error)
 }
 
 // certUpdate carries an applied certificate configuration back to the main
@@ -558,7 +558,7 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig, 
 		return false
 	}
 
-	changed, err := s.cert.Reconfigure(ctx, ctx, cfgCopy)
+	changed, err := s.cert.Reconfigure(ctx, cfgCopy)
 	if err != nil {
 		nlog.Core().Error("failed to apply runtime cert config", "mode", cfgCopy.CertMode, "error", err)
 		return false
@@ -633,7 +633,7 @@ func (s *Service) runCertReconfigure(ctx context.Context, cfg config.CertConfig)
 
 	for {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		changed, err := reconfigure(rctx, ctx, cfg)
+		changed, err := reconfigure(rctx, cfg)
 		cancel()
 		if err == nil {
 			attempt = 0

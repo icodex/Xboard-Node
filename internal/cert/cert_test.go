@@ -364,7 +364,7 @@ func TestTearDownACME_KeepsMaterial(t *testing.T) {
 
 	m.tearDownACME()
 
-	if m.acmeStarted || m.magic != nil {
+	if m.acmeStarted || m.cache != nil {
 		t.Fatal("tear-down should clear ACME state")
 	}
 	if !m.HasCert() {
@@ -397,5 +397,30 @@ func TestManagerStopCancelsACME(t *testing.T) {
 	}
 	if !m.HasCert() {
 		t.Fatal("Stop must keep the in-memory cert material")
+	}
+}
+
+// Start creates a manager-owned lifetime so Stop can cancel ACME maintenance
+// even when the service is torn down on the daemon context (runNodeService
+// retries reuse it).
+func TestManagerStopCancelsLifetime(t *testing.T) {
+	m := NewManager(config.CertConfig{CertMode: "none"})
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	life := m.lifetime()
+	if life == nil {
+		t.Fatal("Start must create a manager lifetime")
+	}
+
+	m.Stop()
+
+	select {
+	case <-life.Done():
+	default:
+		t.Fatal("Stop must cancel the manager lifetime")
+	}
+	if m.lifetime() != nil {
+		t.Fatal("Stop must clear the lifetime")
 	}
 }

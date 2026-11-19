@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -56,7 +57,15 @@ type Manager struct {
 	// Atomic so the ACME renewal goroutine can swap without racing readers.
 	mat atomic.Pointer[certMaterial]
 
-	magic           *certmagic.Config
+	// lifeMu guards the lifetime created by Start and cancelled by Stop.
+	// Reconfigure runs on a service worker while Stop runs on teardown, so the
+	// ACME state below is guarded by acmeMu as well.
+	lifeMu     sync.Mutex
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+
+	acmeMu          sync.Mutex
+	cache           *certmagic.Cache
 	renewed         atomic.Bool
 	acmeStarted     bool
 	acmeFingerprint string
@@ -179,20 +188,23 @@ func (m *Manager) loadPersistedPEM() bool {
 // Reconfigure applies a new cert configuration at runtime (e.g. from panel push).
 // Returns true when the PEM material changed (caller should restart kernel).
 //
-// opCtx bounds the blocking work (issuance can take minutes); lifetimeCtx owns
-// the long-running ACME maintenance. The caller cancels opCtx when the attempt
-// returns, so renewal must not be derived from it.
-func (m *Manager) Reconfigure(opCtx, lifetimeCtx context.Context, newCfg config.CertConfig) (bool, error) {
+// opCtx bounds the blocking work (issuance can take minutes). ACME
+// maintenance runs on the manager lifetime created by Start, so Stop can
+// cancel it without racing the worker that calls this method.
+func (m *Manager) Reconfigure(opCtx context.Context, newCfg config.CertConfig) (bool, error) {
 	if newCfg.CertDir == "" {
 		newCfg.CertDir = m.cfg.CertDir
 	}
 
 	// If ACME is running and the new config materially differs (or switches
 	// away from ACME), tear down the old certmagic instance first.
-	if m.acmeStarted {
+	m.acmeMu.Lock()
+	started, fingerprint := m.acmeStarted, m.acmeFingerprint
+	m.acmeMu.Unlock()
+	if started {
 		newFp := acmeFingerprint(newCfg)
 		newMode := resolveModeFor(newCfg)
-		if newMode != "http" && newMode != "dns" || newFp != m.acmeFingerprint {
+		if newMode != "http" && newMode != "dns" || newFp != fingerprint {
 			m.tearDownACME()
 		}
 	}
@@ -200,7 +212,12 @@ func (m *Manager) Reconfigure(opCtx, lifetimeCtx context.Context, newCfg config.
 	oldTLS := m.TLSCert()
 	m.cfg = newCfg
 
-	if err := m.start(opCtx, lifetimeCtx); err != nil {
+	lifetime := m.lifetime()
+	if lifetime == nil {
+		// Start has not run (tests, embedding): bound maintenance by the call.
+		lifetime = opCtx
+	}
+	if err := m.start(opCtx, lifetime); err != nil {
 		return false, fmt.Errorf("cert reconfigure: %w", err)
 	}
 
@@ -208,18 +225,32 @@ func (m *Manager) Reconfigure(opCtx, lifetimeCtx context.Context, newCfg config.
 	return !pemEqual(oldTLS, newTLS), nil
 }
 
+// lifetime returns the manager-owned context, nil before Start/after Stop.
+func (m *Manager) lifetime() context.Context {
+	m.lifeMu.Lock()
+	defer m.lifeMu.Unlock()
+	return m.lifeCtx
+}
+
 // tearDownACME cancels the running certmagic background goroutines and clears
 // related state so a fresh ACME init can run. The in-memory cert material is
 // deliberately kept: until the new configuration produces valid PEM, the old
 // material is the only thing keeping TLS validation and warm restarts alive.
 func (m *Manager) tearDownACME() {
-	if m.acmeCancel != nil {
-		m.acmeCancel()
-		m.acmeCancel = nil
-	}
-	m.magic = nil
+	m.acmeMu.Lock()
+	cancel, cache := m.acmeCancel, m.cache
+	m.acmeCancel = nil
+	m.cache = nil
 	m.acmeStarted = false
 	m.acmeFingerprint = ""
+	m.acmeMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if cache != nil {
+		cache.Stop()
+	}
 }
 
 // acmeFingerprint produces a stable string capturing every config field that
@@ -326,10 +357,21 @@ func pemEqual(a, b kernel.TLSCert) bool {
 	return string(a.CertPEM) == string(b.CertPEM) && string(a.KeyPEM) == string(b.KeyPEM)
 }
 
-// Start initializes the cert manager based on the resolved mode. The context
-// bounds the blocking work and also owns ACME maintenance (startup path).
+// Start initializes the cert manager based on the resolved mode. ctx bounds
+// the blocking work; ACME maintenance runs on a manager-owned context that
+// Stop cancels (so a failed service instance does not leak renewal goroutines
+// across runNodeService retries).
 func (m *Manager) Start(ctx context.Context) error {
-	return m.start(ctx, ctx)
+	lifeCtx, cancel := context.WithCancel(ctx)
+	m.lifeMu.Lock()
+	m.lifeCtx, m.lifeCancel = lifeCtx, cancel
+	m.lifeMu.Unlock()
+
+	if err := m.start(ctx, lifeCtx); err != nil {
+		cancel()
+		return err
+	}
+	return nil
 }
 
 // start separates the blocking-work deadline from the ACME maintenance
@@ -359,11 +401,19 @@ func (m *Manager) start(ctx, lifetimeCtx context.Context) error {
 	}
 }
 
-// Stop cancels ACME maintenance so a failed service instance does not leave a
-// certmagic cache and renewal goroutine behind until the daemon context ends;
-// runNodeService rebuilds the service on setup errors and would otherwise
-// accumulate one per retry. The manager must not be reused after Stop.
+// Stop cancels the manager lifetime and tears down ACME maintenance. The
+// lifetime cancel alone stops renewals (ManageAsync's context derives from it);
+// the teardown also releases the certmagic cache. Locking keeps this safe
+// against a Reconfigure worker running on the service goroutine.
 func (m *Manager) Stop() {
+	m.lifeMu.Lock()
+	cancel := m.lifeCancel
+	m.lifeCtx, m.lifeCancel = nil, nil
+	m.lifeMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 	m.tearDownACME()
 }
 
@@ -481,7 +531,10 @@ func (m *Manager) startContent() error {
 
 func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certmagic.DNS01Solver) error {
 	// Idempotent for unchanged config: Reconfigure already tore down stale ACME state.
-	if m.acmeStarted {
+	m.acmeMu.Lock()
+	started := m.acmeStarted
+	m.acmeMu.Unlock()
+	if started {
 		return nil
 	}
 
@@ -556,7 +609,6 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 	magic.Issuers = []certmagic.Issuer{
 		certmagic.NewACMEIssuer(magic, issuer),
 	}
-	m.magic = magic
 
 	// Derived from the manager lifetime so Reconfigure can cancel ACME
 	// background goroutines, while the per-attempt deadline only bounds the
@@ -580,9 +632,12 @@ func (m *Manager) startACME(opCtx, lifetimeCtx context.Context, dnsSolver *certm
 		return fmt.Errorf("start cert manager: %w", err)
 	}
 
+	m.acmeMu.Lock()
 	m.acmeCancel = acmeCancel
 	m.acmeFingerprint = acmeFingerprint(m.cfg)
 	m.acmeStarted = true
+	m.cache = cache
+	m.acmeMu.Unlock()
 	return nil
 }
 

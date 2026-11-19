@@ -674,3 +674,23 @@ func TestWSClient_DeviceReportReturnsDelivery(t *testing.T) {
 		t.Fatal("connected client must report the frame as enqueued")
 	}
 }
+
+// The device reporter must report a dropped frame as not enqueued, so the
+// service can mark the snapshot stale instead of losing it.
+func TestSendDeviceReportReturnsFalseWhenChannelUnavailable(t *testing.T) {
+	ws := NewWSClient("ws://127.0.0.1:1", "t", 1, WSClientConfig{}, func(WSEvent) {}, nil, nil)
+
+	ch := make(chan wsMessage, 1)
+	ch <- wsMessage{Event: "fill"}
+	ws.writeCh.Store(&ch)
+	ws.connected.Store(true)
+
+	if ws.SendDeviceReportForNode(0, map[int][]string{1: {"1.1.1.1"}}) {
+		t.Fatal("full write channel must report not enqueued")
+	}
+
+	ws.writeCh.Store(nil)
+	if ws.SendDeviceReportForNode(0, map[int][]string{1: {"1.1.1.1"}}) {
+		t.Fatal("missing write channel must report not enqueued")
+	}
+}
