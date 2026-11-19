@@ -67,12 +67,24 @@ type Service struct {
 	// pullResults delivers async pullViaAPI results back to the main goroutine.
 	pullResults chan pullResult
 
-	wsClient         controlplane.PushClient        // Push client (nil if push is not enabled)
-	wsEvents         chan controlplane.Event        // receives data events from push transport
-	wsStatusCh       chan controlplane.StatusChange // receives push connectivity notifications
-	wsCancel         context.CancelFunc             // cancels the WS client goroutine
-	wsDisconnectAt   time.Time                      // when WS last disconnected (zero if connected)
-	wsResyncPending  atomic.Bool
+	wsClient        controlplane.PushClient        // Push client (nil if push is not enabled)
+	wsEvents        chan controlplane.Event        // receives data events from push transport
+	wsStatusCh      chan controlplane.StatusChange // receives push connectivity notifications
+	wsCancel        context.CancelFunc             // cancels the WS client goroutine
+	wsDisconnectAt  time.Time                      // when WS last disconnected (zero if connected)
+	wsResyncPending atomic.Bool
+
+	// stateSeq counts applied config/user state changes from any source. A
+	// poll captures it before fetching; a result whose captured value no
+	// longer matches is stale and must not overwrite newer pushed state.
+	// Every path that writes lastUsers or lastConfig must bump it; otherwise
+	// stale polls regress to overwriting that state.
+	stateSeq atomic.Uint64
+	// resyncGen counts reconciliation requests. A poll captures it at start
+	// and may clear wsResyncPending only when it satisfies every request made
+	// so far; otherwise the pull ticker retries.
+	resyncGen atomic.Uint64
+
 	machineMailbox   *controlplane.NodeMailbox
 	machineMailboxCh <-chan struct{}
 
@@ -119,6 +131,12 @@ type pullResult struct {
 	users      []model.UserSpec
 	configHash string
 	userHash   string
+	// seq is stateSeq when the poll started; a mismatch means newer pushed
+	// state was applied while the snapshot was in flight.
+	seq uint64
+	// gen is resyncGen when the poll started; it gates clearing the pending
+	// reconciliation flag.
+	gen uint64
 }
 
 // apiBackoff implements simple exponential backoff for API failures.
@@ -368,12 +386,14 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 
 		case <-pullTicker.C:
-			// When WebSocket is connected, skip REST polling entirely.
-			// Config/user updates arrive via WS push.
-			if s.wsClient != nil && s.wsClient.IsConnected() {
+			// When WebSocket is connected, skip REST polling entirely:
+			// config/user updates arrive via WS push. A pending
+			// reconciliation overrides that — a dropped event or a failed
+			// resync poll must still converge while the WS stays up.
+			if s.wsClient != nil && s.wsClient.IsConnected() && !s.wsResyncPending.Load() {
 				continue
 			}
-			nlog.Core().Debug("polling from API (ws not connected)")
+			nlog.Core().Debug("polling from API", "resync_pending", s.wsResyncPending.Load())
 			s.pullViaAPIAsync(ctx)
 
 		case result := <-s.pullResults:
@@ -690,13 +710,16 @@ func (s *Service) drainMachineMailbox(ctx context.Context) {
 }
 
 func (s *Service) requestWSResync(ctx context.Context, reason string) {
-	if !s.wsResyncPending.CompareAndSwap(false, true) {
-		return
-	}
-	if s.nodeLog != nil {
-		s.nodeLog.Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
-	} else {
-		nlog.Core().Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
+	// Every request advances the generation: a poll that was already in
+	// flight when this request arrived does not cover it, so it must not
+	// clear the pending flag on completion.
+	s.resyncGen.Add(1)
+	if !s.wsResyncPending.Swap(true) {
+		if s.nodeLog != nil {
+			s.nodeLog.Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
+		} else {
+			nlog.Core().Warn("ws state may be stale, scheduling REST reconciliation", "reason", reason)
+		}
 	}
 	s.pullViaAPIAsync(ctx)
 }
@@ -825,6 +848,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			nlog.Core().Warn("kernel auto-selection failed, ignoring update", "error", err)
 			return
 		}
+		s.stateSeq.Add(1)
 		// Initialize nodeLog on first config
 		if s.nodeLog == nil {
 			s.nodeLog = nlog.ForNode(nodeDisplayProtocol(event.Config), event.Config.ServerPort)
@@ -845,6 +869,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if newHash == s.lastUserHash {
 			return
 		}
+		s.stateSeq.Add(1)
 		if s.nodeLog != nil {
 			s.nodeLog.Info(fmt.Sprintf("users updated, %d users", len(event.Users)))
 		}
@@ -857,6 +882,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if len(event.DeltaUsers) == 0 {
 			return
 		}
+		s.stateSeq.Add(1)
 		// The panel emits one delta per edited user. Applying each on the main
 		// loop costs a full pass over every user (limiter maps, speed buckets,
 		// user-map rebuild, hash), and a burst overflows wsEvents, which
@@ -924,15 +950,19 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 
 	go func() {
 		defer s.pullActive.Store(false)
+		// Captured before the request: state applied while the snapshot is in
+		// flight makes this result older than what the main loop holds.
+		result := pullResult{seq: s.stateSeq.Load(), gen: s.resyncGen.Load()}
+
 		snapshot, err := s.source.Poll(ctx)
 		if err != nil {
 			nlog.Core().Error("poll control plane failed", "error", err)
 			s.pullBackoff.onFailure()
+			// Keep wsResyncPending set: the pull ticker retries even while
+			// the WS is connected.
 			return
 		}
 		s.pullBackoff.onSuccess()
-
-		result := pullResult{}
 		if snapshot.Config != nil {
 			result.config = snapshot.Config
 			result.configHash = computeConfigHash(snapshot.Config)
@@ -954,7 +984,23 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 
 // applyPullResult processes the result of an async pullViaAPI on the main goroutine.
 func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
-	s.wsResyncPending.Store(false)
+	// The snapshot predates state that has since been applied: applying it
+	// would re-enable removed users or roll config back to the old spec. Keep
+	// the resync pending so the pull ticker fetches a fresh snapshot.
+	if result.seq != s.stateSeq.Load() {
+		nlog.Core().Debug("dropping stale poll result, newer state already applied")
+		s.wsResyncPending.Store(true)
+		return
+	}
+	// Any applied poll result becomes the new state baseline.
+	s.stateSeq.Add(1)
+	// A poll only satisfies the requests issued before it started; requests
+	// that arrived while it was in flight keep the flag set for the next tick.
+	defer func() {
+		if result.gen >= s.resyncGen.Load() {
+			s.wsResyncPending.Store(false)
+		}
+	}()
 	configChanged := false
 
 	if result.config != nil {
