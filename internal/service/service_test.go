@@ -40,6 +40,10 @@ type fakeKernel struct {
 
 	speedLimitFunc  func(string) *rate.Limiter
 	deviceLimitFunc func(string) (int, bool)
+
+	traffic   map[int][2]int64
+	aliveIPs  map[int]map[string]bool
+	connCount int
 }
 
 func (f *fakeKernel) Name() string        { return "fake" }
@@ -94,7 +98,7 @@ func (f *fakeKernel) UpdateUsers(users []model.UserSpec) (int, int, error) {
 }
 func (f *fakeKernel) GetUserTraffic(ctx context.Context) (map[int][2]int64, map[int]map[string]bool, int, error) {
 	_ = ctx
-	return nil, nil, 0, nil
+	return f.traffic, f.aliveIPs, f.connCount, nil
 }
 func (f *fakeKernel) SetSpeedLimitFunc(fn func(uuid string) *rate.Limiter) { f.speedLimitFunc = fn }
 func (f *fakeKernel) SetDeviceLimitFunc(fn func(uuid string) (int, bool))  { f.deviceLimitFunc = fn }
@@ -114,6 +118,25 @@ func newTestService(k *fakeKernel) *Service {
 	k.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	k.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
 	return s
+}
+
+func TestSampleFinalKernelTrafficFlushesKernelCounters(t *testing.T) {
+	k := &fakeKernel{running: true, traffic: map[int][2]int64{7: {100, 200}}}
+	s := newTestService(k)
+	s.sampleFinalKernelTraffic()
+	s.sampleFinalKernelTraffic() // cumulative counters: must not double count
+	got := s.tracker.FlushTraffic()
+	if got[7] != [2]int64{100, 200} {
+		t.Fatalf("flushed = %v, want {100 200}", got[7])
+	}
+}
+
+func TestSampleFinalKernelTrafficSkipsStoppedKernel(t *testing.T) {
+	s := newTestService(&fakeKernel{running: false, traffic: map[int][2]int64{1: {1, 1}}})
+	s.sampleFinalKernelTraffic()
+	if got := s.tracker.FlushTraffic(); len(got) != 0 {
+		t.Fatalf("stopped kernel must not flush traffic, got %v", got)
+	}
 }
 
 func TestNodeCertDir_IsolatesPerNodeDomains(t *testing.T) {

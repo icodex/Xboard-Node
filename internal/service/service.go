@@ -428,6 +428,10 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Kernel counters are otherwise only copied into the tracker on
+			// the track ticker, so a stop inside one interval would drop that
+			// traffic from the final report.
+			s.sampleFinalKernelTraffic()
 			// Let in-flight reports finish first: a failed one restores its
 			// traffic into the tracker, and the final snapshot must include it.
 			s.waitInFlightPushes()
@@ -1644,6 +1648,24 @@ func (s *Service) trackAndEnforce(ctx context.Context) {
 			nlog.TrackerStats(connCount, len(traffic))
 		}
 	}
+}
+
+// sampleFinalKernelTraffic captures the last kernel counters before shutdown.
+// Kernel traffic is otherwise only copied into the tracker on trackTicker, so
+// a restart or stop inside one interval would drop that traffic from the final
+// report.
+func (s *Service) sampleFinalKernelTraffic() {
+	if s.kernel == nil || !s.kernel.IsRunning() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	traffic, aliveIPs, connCount, err := s.kernel.GetUserTraffic(ctx)
+	if err != nil {
+		nlog.Core().Warn("final traffic sample failed", "error", err)
+		return
+	}
+	s.tracker.Process(traffic, aliveIPs, connCount)
 }
 
 // pushReportAsync sends the report in a background goroutine so the select

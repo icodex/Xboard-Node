@@ -225,6 +225,19 @@ func TestValidateNodeSpec_HysteriaPolicy(t *testing.T) {
 	}
 }
 
+func TestValidateNodeSpec_XrayHysteria2RejectsObfs(t *testing.T) {
+	spec := &NodeSpec{Protocol: "hysteria", Version: 2, ServerPort: 8443, Obfs: "salamander"}
+	if err := ValidateNodeSpec(spec, config.KernelConfig{Type: "xray"}); err == nil || !contains(err.Error(), "Hysteria2 obfs") {
+		t.Fatalf("want xray obfs rejection, got %v", err)
+	}
+	if err := ValidateNodeSpec(&NodeSpec{Protocol: "hysteria", Version: 2, ServerPort: 8443}, config.KernelConfig{Type: "xray"}); err != nil {
+		t.Fatalf("xray without obfs: %v", err)
+	}
+	if err := ValidateNodeSpec(spec, config.KernelConfig{Type: "singbox"}); err != nil {
+		t.Fatalf("singbox with obfs: %v", err)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

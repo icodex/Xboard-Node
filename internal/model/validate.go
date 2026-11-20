@@ -69,6 +69,13 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 		return fmt.Errorf("xray kernel only supports hysteria v2: set version=2 or switch kernel to singbox")
 	}
 
+	// The xray builder has no Hysteria2 obfs (salamander): the inbound would
+	// start without obfs while subscription clients dial with it, so every
+	// connection fails with no server-side hint.
+	if kernelType == "xray" && n.Protocol == "hysteria" && n.Version == 2 && strings.TrimSpace(n.Obfs) != "" {
+		return fmt.Errorf("xray kernel does not implement Hysteria2 obfs %q: disable obfs or switch kernel to singbox", n.Obfs)
+	}
+
 	// Neither kernel implements SIP003 plugins; serving such a node would run
 	// a plaintext-capable inbound while clients try to dial with the plugin
 	// from the subscription link and fail without any server-side hint.
