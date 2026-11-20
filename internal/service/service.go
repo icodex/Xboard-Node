@@ -274,7 +274,24 @@ func (s *Service) buildKernel(kernelType string) kernel.Kernel {
 // (or rebuilding, on hot config change) it when the resolved type differs.
 // Callers must hold no other service locks; kernel ops stay on the main loop.
 func (s *Service) ensureKernelFor(spec *model.NodeSpec) (kernel.Kernel, error) {
-	return s.ensureKernelResolved(spec, model.ResolveKernelForNode(spec, s.cfg.Kernel))
+	return s.ensureKernelResolved(spec, s.resolveKernelForSpec(spec))
+}
+
+// resolveKernelForSpec resolves the kernel for a spec and makes a pinned-kernel
+// transport flip visible: a pinned kernel that cannot parse the transport is
+// silently swapped by ResolveKernelForTransport, which used to leave the admin
+// seeing a pin that no longer matched the kernel actually running.
+func (s *Service) resolveKernelForSpec(spec *model.NodeSpec) string {
+	resolved := model.ResolveKernelForNode(spec, s.cfg.Kernel)
+	pinned := strings.ToLower(strings.TrimSpace(s.cfg.Kernel.Type))
+	if pinned == "auto" || pinned == "" || spec == nil || resolved == pinned {
+		return resolved
+	}
+	nlog.Core().Error("pinned kernel does not support this transport, serving with the other kernel instead",
+		"pinned", pinned, "resolved", resolved,
+		"protocol", spec.Protocol, "network", spec.Network, "node_id", s.cfg.Panel.NodeID,
+		"hint", "pin matches the running kernel now; change kernel_type on the panel or the transport to get rid of this")
+	return resolved
 }
 
 // ensureKernelResolved is ensureKernelFor with the resolution done by the
