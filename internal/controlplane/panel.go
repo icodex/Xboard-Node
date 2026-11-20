@@ -185,7 +185,17 @@ func (p *PanelControlPlane) newPushClient(metricsFn func() map[string]interface{
 		func(event panel.WSEvent) {
 			translated, err := TranslateWSEvent(event, p.kcfg)
 			if err != nil {
-				nlog.Core().Warn("invalid ws event config, dropping event", "type", event.Type, "error", err)
+				// A rejected config means this node cannot serve at all (the
+				// panel pinned a kernel/protocol/transport combination the
+				// kernel does not implement). Logging a warning and dropping
+				// the event left the node silently dead with no panel-visible
+				// reason, so surface it as an error and report it upstream.
+				nlog.Core().Error("rejected panel config, node cannot start",
+					"type", event.Type, "node_id", p.cfg.NodeID, "error", err)
+				select {
+				case statuses <- StatusChange{Connected: true, ConfigError: err.Error()}:
+				default:
+				}
 				return
 			}
 			select {

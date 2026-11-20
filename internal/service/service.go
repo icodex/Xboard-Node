@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,6 +90,12 @@ type Service struct {
 
 	// metricsMu: lastUsers, lastConfig, wsClient, wsDisconnectAt (buildMetrics vs main loop).
 	metricsMu sync.RWMutex
+
+	// configErr holds the last config rejection reported by the control plane
+	// or by handleWSEvent. It is shipped in metrics so the panel can show why
+	// this node never started instead of only "offline".
+	configErrMu sync.Mutex
+	configErr   string
 
 	// Certificate reconfiguration runs off the main loop: ACME issuance
 	// (HTTP-01/DNS-01) can take minutes and must not stall reports, tracking
@@ -314,6 +322,102 @@ func (s *Service) currentKernel() kernel.Kernel {
 	k := s.kernel
 	s.kernelMu.Unlock()
 	return k
+}
+
+// listenHostForProbe returns the host the kernel is expected to bind.
+func listenHostForProbe(nc *model.NodeSpec) string {
+	if ip := strings.TrimSpace(nc.ListenIP); ip != "" {
+		return ip
+	}
+	return "0.0.0.0"
+}
+
+// probeListenPort reports whether the kernel can bind the node's port. UDP
+// protocols (hysteria/tuic/mieru) are probed over UDP, everything else over
+// TCP; wildcard listeners are checked on both address families because a
+// foreign IPv4 wildcard does not block a dual-stack IPv6 bind (and vice versa).
+func probeListenPort(nc *model.NodeSpec) error {
+	network := "tcp"
+	switch strings.ToLower(strings.TrimSpace(nc.Protocol)) {
+	case "hysteria", "tuic", "mieru":
+		network = "udp"
+	}
+
+	host := strings.TrimSpace(nc.ListenIP)
+	hosts := []string{host}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		hosts = []string{"0.0.0.0", "::"}
+	}
+	for _, h := range hosts {
+		if err := probeOne(network, h, nc.ServerPort); err != nil {
+			if isUnsupportedFamily(err) {
+				continue
+			}
+			return fmt.Errorf("bind %s: %w", net.JoinHostPort(h, fmt.Sprint(nc.ServerPort)), err)
+		}
+	}
+	return nil
+}
+
+// probeOne tries one bind and closes it immediately.
+func probeOne(network, host string, port int) error {
+	proto := network
+	switch host {
+	case "0.0.0.0":
+		proto = network + "4"
+	case "::":
+		proto = network + "6"
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+	if network == "udp" {
+		conn, err := net.ListenPacket(proto, addr)
+		if err != nil {
+			return err
+		}
+		return conn.Close()
+	}
+	ln, err := net.Listen(proto, addr)
+	if err != nil {
+		return err
+	}
+	return ln.Close()
+}
+
+// isUnsupportedFamily reports address-family errors that mean "this host has
+// no such stack", not "the port is taken".
+func isUnsupportedFamily(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "address family not supported") ||
+		strings.Contains(msg, "cannot assign requested address") ||
+		strings.Contains(msg, "no suitable address")
+}
+
+// setConfigError records (or clears, with "") the current config rejection.
+// The message is logged once and reported to the panel via metrics.
+func (s *Service) setConfigError(msg string) {
+	s.configErrMu.Lock()
+	prev := s.configErr
+	s.configErr = msg
+	s.configErrMu.Unlock()
+	if msg != "" && msg != prev {
+		nodeID := 0
+		if s.cfg != nil {
+			nodeID = s.cfg.Panel.NodeID
+		}
+		nlog.Core().Error("node config rejected, kernel will not start",
+			"node_id", nodeID, "error", msg)
+	}
+}
+
+// configError returns the current rejection message ("" when healthy).
+func (s *Service) configError() string {
+	s.configErrMu.Lock()
+	defer s.configErrMu.Unlock()
+	return s.configErr
 }
 
 // kernelRunning reports whether the current kernel accepts connections.
@@ -858,6 +962,9 @@ func (s *Service) wsMetrics() map[string]interface{} {
 // - On disconnect: record timestamp, immediately REST poll.
 // - On reconnect: clear disconnect timestamp, REST poll to catch missed events.
 func (s *Service) handleWSStatus(ctx context.Context, status controlplane.StatusChange) {
+	if status.ConfigError != "" {
+		s.setConfigError(status.ConfigError)
+	}
 	if status.NeedsResync {
 		s.requestWSResync(ctx, "drop_detected")
 	}
@@ -962,14 +1069,15 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			return
 		}
 		if err := validateNodeRuntime(s.cfg, s.kernelProtocolsFor(event.Config), event.Config, s.cert.TLSCert()); err != nil {
-			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
+			s.setConfigError(err.Error())
 			return
 		}
 		// Validation passed — safe to swap the kernel for this spec now.
 		if err := s.resolveAutoKernel(event.Config); err != nil {
-			nlog.Core().Warn("kernel auto-selection failed, ignoring update", "error", err)
+			s.setConfigError(err.Error())
 			return
 		}
+		s.setConfigError("")
 		s.stateSeq.Add(1)
 		// Initialize nodeLog on first config
 		if s.nodeLog == nil {
@@ -1284,6 +1392,23 @@ func nodeDisplayProtocol(nc *model.NodeSpec) string {
 // startKernel starts (or restarts) the kernel with the given config/users and
 // records the successfully applied state. Returns false on error.
 func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
+	// A foreign process already holding the port lets the kernel bind a
+	// dual-stack socket that never receives traffic (macOS: foreign IPv4
+	// wildcard + our IPv6 wildcard), so the node reports "started" while every
+	// connection lands elsewhere. Probe before the cold start and fail loudly.
+	// A running kernel owns the port on reload paths, so only cold starts probe.
+	if !s.kernel.IsRunning() {
+		if err := probeListenPort(nc); err != nil {
+			addr := fmt.Sprintf("%s:%d", listenHostForProbe(nc), nc.ServerPort)
+			s.setConfigError(fmt.Sprintf("listen address %s unavailable: %v", addr, err))
+			nlog.Core().Error("listen address unavailable, kernel not started",
+				"addr", addr, "protocol", nc.Protocol, "error", err,
+				"hint", "another process holds this port; free it or change server_port on the panel")
+			s.lastConfigHash = ""
+			s.lastUserHash = ""
+			return false
+		}
+	}
 	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
 		nlog.Core().Error("failed to start kernel", "error", err)
 		// A transient failure (EADDRINUSE during a reload, cert not readable
@@ -1299,6 +1424,9 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	// clears the periodic-retry backoff, so a later failure starts retrying
 	// immediately instead of inheriting an old skip count.
 	s.startBackoff.onSuccess()
+	// The kernel is serving: any previously reported config/listen rejection
+	// no longer holds.
+	s.setConfigError("")
 
 	// Initialize node logger on first successful start
 	if s.nodeLog == nil {
@@ -1766,6 +1894,9 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 
 	m["uptime"] = status.Uptime
 	m["goroutines"] = status.Goroutines
+	if cfgErr := s.configError(); cfgErr != "" {
+		m["config_error"] = cfgErr
+	}
 
 	// Active connections (last measured during tracker.Process()).
 	m["active_connections"] = s.tracker.ActiveConnections()

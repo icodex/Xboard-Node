@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,13 @@ const maxResponseBytes = 10 << 20
 // CapabilityDeviceDelta is advertised in report.status so the panel knows it may
 // send sync.devices.delta (only changed users) instead of the full snapshot.
 const CapabilityDeviceDelta = "device_delta"
+
+// CapabilityMuxBrutal advertises that multiplexed connections on this node can
+// use TCP Brutal, which sing-box/mihomo only support on Linux. Panels must not
+// emit multiplex.brutal to nodes that do not advertise it: when the server
+// rejects the brutal exchange, the client tears down the whole mux connection
+// instead of falling back.
+const CapabilityMuxBrutal = "mux_brutal"
 
 var (
 	trafficMapPool = sync.Pool{New: func() interface{} { return make(map[string][2]int64) }}
@@ -172,7 +180,7 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 		"disk": map[string]interface{}{"total": disk[0], "used": disk[1]},
 		// Feature advertisement: the panel only sends sync.devices.delta to nodes
 		// that list it here, so older nodes keep receiving the full snapshot.
-		"capabilities": []string{CapabilityDeviceDelta},
+		"capabilities": capabilities(),
 	}
 	payload["status"] = status
 
@@ -181,6 +189,17 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 	}
 
 	return c.postJSON("/api/v2/server/report", payload)
+}
+
+// capabilities lists the optional features this node can actually enforce.
+// Only what the local platform supports is advertised, so the panel never
+// emits settings the kernel would either reject or silently ignore.
+func capabilities() []string {
+	caps := []string{CapabilityDeviceDelta}
+	if runtime.GOOS == "linux" {
+		caps = append(caps, CapabilityMuxBrutal)
+	}
+	return caps
 }
 
 // decodeWeakRaw decodes an interface (from JSON map) into a struct using weak type conversion.

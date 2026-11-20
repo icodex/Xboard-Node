@@ -467,7 +467,9 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 
 	translated, err := controlplane.TranslateWSEvent(event, o.kernelForNode(nodeID))
 	if err != nil {
-		nlog.Core().Warn("machine ws event translation failed",
+		// Same as single-node mode: a rejected config leaves the node dead
+		// with nothing but a warning, so make it an error with node context.
+		nlog.Core().Error("machine ws event translation failed, node cannot start",
 			"type", event.Type, "node_id", nodeID, "error", err)
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -1138,6 +1139,11 @@ func buildRealityConfig(nc *model.NodeSpec) M {
 	return tls
 }
 
+// muxBrutalSupported mirrors sing-mux's compile-time BrutalAvailable: the
+// kernel refuses to build an inbound carrying brutal on non-Linux platforms.
+// Variable (not a const) so tests can exercise both branches on any host.
+var muxBrutalSupported = runtime.GOOS == "linux"
+
 func applyMultiplex(base M, nc *model.NodeSpec) {
 	if nc.Multiplex == nil || !nc.Multiplex.Enabled {
 		return
@@ -1157,16 +1163,26 @@ func applyMultiplex(base M, nc *model.NodeSpec) {
 	}
 
 	if nc.Multiplex.Brutal != nil && nc.Multiplex.Brutal.Enabled {
-		brutal := M{
-			"enabled": true,
+		if !muxBrutalSupported {
+			// sing-mux/NewService refuses to build on other platforms
+			// ("TCP Brutal is only supported on Linux"), which fails the whole
+			// inbound and leaves the node in a restart loop. Keep the mux and
+			// drop only the brutal knob; the panel stops advertising brutal to
+			// nodes that do not report the mux_brutal capability.
+			nlog.Core().Error("TCP Brutal is Linux-only, dropping multiplex.brutal so the inbound can start",
+				"protocol", nc.Protocol, "goos", runtime.GOOS)
+		} else {
+			brutal := M{
+				"enabled": true,
+			}
+			if nc.Multiplex.Brutal.UpMbps > 0 {
+				brutal["up_mbps"] = nc.Multiplex.Brutal.UpMbps
+			}
+			if nc.Multiplex.Brutal.DownMbps > 0 {
+				brutal["down_mbps"] = nc.Multiplex.Brutal.DownMbps
+			}
+			mux["brutal"] = brutal
 		}
-		if nc.Multiplex.Brutal.UpMbps > 0 {
-			brutal["up_mbps"] = nc.Multiplex.Brutal.UpMbps
-		}
-		if nc.Multiplex.Brutal.DownMbps > 0 {
-			brutal["down_mbps"] = nc.Multiplex.Brutal.DownMbps
-		}
-		mux["brutal"] = brutal
 	}
 
 	base["multiplex"] = mux

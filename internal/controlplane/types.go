@@ -32,6 +32,10 @@ type Event struct {
 type StatusChange struct {
 	Connected   bool
 	NeedsResync bool
+	// ConfigError carries a per-node config rejection (protocol/kernel
+	// mismatch, unsupported transport) so the service can surface it in the
+	// status report instead of dropping the event silently.
+	ConfigError string
 }
 
 type APIMetrics struct {

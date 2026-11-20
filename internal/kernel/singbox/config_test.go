@@ -1456,3 +1456,43 @@ func TestBuildNaiveALPNEmptyListDefaultsToH2(t *testing.T) {
 		t.Fatalf("naive alpn = %#v, want [h2]", tls["alpn"])
 	}
 }
+
+// TCP Brutal is Linux-only: sing-mux refuses to build the inbound and the whole
+// node never starts. The node must keep the mux and drop only the brutal knob.
+func TestApplyMultiplex_BrutalDroppedWhenUnsupported(t *testing.T) {
+	prev := muxBrutalSupported
+	t.Cleanup(func() { muxBrutalSupported = prev })
+
+	nc := &model.NodeSpec{
+		Protocol: "vmess",
+		Multiplex: &model.MultiplexConfig{
+			Enabled:  true,
+			Protocol: "yamux",
+			Padding:  true,
+			Brutal:   &model.BrutalConfig{Enabled: true, UpMbps: 100, DownMbps: 100},
+		},
+	}
+
+	muxBrutalSupported = false
+	base := M{}
+	applyMultiplex(base, nc)
+	muxOpts, _ := base["multiplex"].(M)
+	if muxOpts == nil {
+		t.Fatalf("multiplex must stay enabled, got %v", base["multiplex"])
+	}
+	if _, ok := muxOpts["brutal"]; ok {
+		t.Fatalf("brutal must be dropped on non-Linux, got %v", muxOpts["brutal"])
+	}
+	if muxOpts["padding"] != true {
+		t.Fatalf("padding must survive, got %v", muxOpts)
+	}
+
+	muxBrutalSupported = true
+	base = M{}
+	applyMultiplex(base, nc)
+	muxOpts, _ = base["multiplex"].(M)
+	brutal, ok := muxOpts["brutal"].(M)
+	if !ok || brutal["enabled"] != true || brutal["up_mbps"] != 100 {
+		t.Fatalf("brutal must be emitted on Linux, got %v", muxOpts["brutal"])
+	}
+}
