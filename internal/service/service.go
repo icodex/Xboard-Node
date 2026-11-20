@@ -1894,6 +1894,13 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 
 	m["uptime"] = status.Uptime
 	m["goroutines"] = status.Goroutines
+	// Which kernel actually serves this node (auto mode can pick either). The
+	// panel needs it to emit settings only the running kernel understands, e.g.
+	// multipath multiplex: sing-box accepts smux/yamux/h2mux, the xray kernel
+	// only speaks mux.cool, which no client config expresses.
+	if k := s.currentKernel(); k != nil {
+		m["kernel"] = k.Name()
+	}
 	if cfgErr := s.configError(); cfgErr != "" {
 		m["config_error"] = cfgErr
 	}
