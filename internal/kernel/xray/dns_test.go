@@ -1,6 +1,8 @@
 package xray
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/kernel"
@@ -128,5 +130,36 @@ func TestPickDNSServers(t *testing.T) {
 	got = pickDNSServers("linux", "", none)
 	if len(got) != 2 || got[0] != "1.1.1.1" || got[1] != "8.8.8.8" {
 		t.Fatalf("fallback pick = %v, want the public resolvers", got)
+	}
+}
+
+// An operator custom_config dns block must still replace the auto-generated
+// one: deployments with split-horizon/DoH resolvers depend on it.
+func TestCustomConfigDNSReplacesGeneratedBlock(t *testing.T) {
+	custom := `{"dns":{"servers":["https+local://dns.google/dns-query"],"queryStrategy":"UseIP"}}`
+	path := filepath.Join(t.TempDir(), "custom.json")
+	if err := os.WriteFile(path, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := systemDNSLookup
+	systemDNSLookup = func() []string { return []string{"1.1.1.1"} }
+	t.Cleanup(func() { systemDNSLookup = prev })
+
+	kcfg := testKernelCfg
+	kcfg.CustomConfig = path
+	nc := &panel.NodeConfig{Protocol: "vmess", ServerPort: 10004}
+	cfg, err := buildConfig(kcfg, testNodeSpec(nc), testUsers, kernel.TLSCert{})
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
+
+	dns, _ := cfg["dns"].(map[string]any)
+	if dns["queryStrategy"] != "UseIP" {
+		t.Fatalf("custom dns not applied: %v", dns)
+	}
+	servers, _ := dns["servers"].([]any)
+	if len(servers) != 1 || servers[0] != "https+local://dns.google/dns-query" {
+		t.Fatalf("custom dns servers not applied: %v", dns["servers"])
 	}
 }
