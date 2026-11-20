@@ -56,7 +56,19 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 
 	// Add default outbounds only if not already defined (Issue #1: Panel priority)
 	if !tags["direct"] {
-		outbounds = append([]M{{"protocol": "freedom", "tag": "direct"}}, outbounds...)
+		// Resolve inside the kernel: with the default AsIs strategy every
+		// domain target is handed to the OS resolver, and one stalled system
+		// resolver then hangs all direct traffic while IP targets keep working.
+		// sockopt.domainStrategy is the documented knob (freedom's own
+		// settings.domainStrategy is deprecated in Xray 26 and auto-migrated
+		// to this same field).
+		outbounds = append([]M{{
+			"protocol": "freedom",
+			"tag":      "direct",
+			"streamSettings": M{
+				"sockopt": M{"domainStrategy": "UseIPv4"},
+			},
+		}}, outbounds...)
 	}
 	if !tags["block"] {
 		// block is often added after direct but before others for safety
@@ -100,8 +112,18 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		cfg["inbounds"] = []M{inbound}
 	}
 
+	// The kernel needs its own resolver: without a dns block, direct dials fall
+	// back to the OS resolver (see the direct outbound above). Servers come from
+	// the host so split-horizon/local resolvers keep working; a custom_config
+	// dns block still replaces this wholesale.
+	dnsServers := systemDNSServers()
+	cfg["dns"] = M{
+		"servers":       dnsServers,
+		"queryStrategy": "UseIPv4",
+	}
+
 	// Merge panel routes and static config routes
-	cfg["routing"] = buildRouting(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
+	cfg["routing"] = buildRouting(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute), dnsServers...)
 
 	mergeCustomXray(cfg, kcfg)
 	return cfg, nil
@@ -802,7 +824,23 @@ func buildRealitySettings(nc *model.NodeSpec) M {
 	return reality
 }
 
-func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteRule, customRules []map[string]any) M {
+// dnsServerIPs returns the resolver addresses that need a routing exception.
+// Only literal IPs are accepted (the config never emits hostnames here).
+func dnsServerIPs(servers []string) []string {
+	ips := make([]string, 0, len(servers))
+	for _, server := range servers {
+		host := server
+		if i := strings.IndexByte(host, '%'); i >= 0 {
+			host = host[:i]
+		}
+		if parsed := net.ParseIP(host); parsed != nil {
+			ips = append(ips, parsed.String())
+		}
+	}
+	return ips
+}
+
+func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteRule, customRules []map[string]any, dnsServers ...string) M {
 	var xrayRules []M
 
 	// Structured custom routes now take the highest priority for panel-managed overrides.
@@ -833,6 +871,19 @@ func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteR
 			continue
 		}
 		xrayRules = append(xrayRules, M(cr))
+	}
+
+	// DNS queries follow routing rules, and the private-address rule below
+	// blocks loopback/LAN resolvers (127.0.0.53 on systemd-resolved hosts, the
+	// docker DNS at 127.0.0.11, LAN routers). Punch a narrow hole for exactly
+	// the configured resolvers on port 53 before that block.
+	if allowed := dnsServerIPs(dnsServers); len(allowed) > 0 {
+		xrayRules = append(xrayRules, M{
+			"type":        "field",
+			"ip":          allowed,
+			"port":        "53",
+			"outboundTag": "direct",
+		})
 	}
 
 	xrayRules = append(xrayRules, M{
