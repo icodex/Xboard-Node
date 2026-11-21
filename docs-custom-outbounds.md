@@ -100,9 +100,6 @@ sing-box-only protocols use sing-box-native `settings` and are passed through.
   kernel for those transports.
 - `h2` / `http` / `quic` transports were removed from the pinned xray-core fork;
   use the sing-box kernel for those.
-- REALITY as a *client* from the sing-box kernel has a known handshake
-  incompatibility against xray-kernel REALITY servers; see
-  `docs-known-issue-singbox-reality-client.md`.
 
 ## Validation
 
